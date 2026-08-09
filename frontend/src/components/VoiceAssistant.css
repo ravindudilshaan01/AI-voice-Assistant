@@ -11,9 +11,9 @@ html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }
 
 body { background: #08090c; }
 
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
-button:focus-visible, input:focus-visible { outline: 2px solid #22c8e8; outline-offset: 3px; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #22c8e8; outline-offset: 3px; }
 
 .command-page {
   position: relative;
@@ -202,6 +202,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #22c8e8; outline-
 .voice-copy { position: relative; z-index: 4; min-height: 106px; margin-top: clamp(7px, 1.2vh, 14px); text-align: center; }
 .voice-copy p, .voice-copy h1 { margin: 0; }
 .heard-command { max-width: 520px; overflow: hidden; color: #1bb4cd !important; font-size: 11px !important; text-overflow: ellipsis; white-space: nowrap; }
+.heard-command--live { min-height: 18px; color: #6eefff !important; text-shadow: 0 0 14px rgba(43, 214, 232, 0.36); animation: live-caption 0.28s ease both; }
 .voice-copy h1 { margin-top: 13px; color: #f0f1fa; font-size: clamp(25px, 2.3vw, 35px); font-weight: 350; letter-spacing: -0.035em; text-shadow: 0 0 24px rgba(180, 198, 255, 0.1); }
 .voice-copy > p:last-of-type { margin-top: 7px; color: #5a6482; font-size: 10px; }
 .recording-clock { display: inline-block; margin-top: 7px; color: #dc57c9; font-size: 9px; font-variant-numeric: tabular-nums; letter-spacing: 0.12em; }
@@ -230,6 +231,28 @@ button:focus-visible, input:focus-visible { outline: 2px solid #22c8e8; outline-
 .command-details dt { color: #1ab7cd; font-size: 8px; font-weight: 700; letter-spacing: 0.05em; }
 .command-details dd { margin: 0; overflow: hidden; color: #8a92ae; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .command-details .accent-value { color: #c258c7; }
+
+.microphone-control { margin-top: 20px; padding: 12px; border: 1px solid rgba(31, 193, 215, 0.13); background: rgba(17, 24, 55, 0.66); }
+.hands-free-row { display: flex; margin-bottom: 12px; padding-bottom: 11px; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid rgba(86, 100, 180, 0.12); }
+.hands-free-row div { min-width: 0; }
+.hands-free-row strong, .hands-free-row small { display: block; }
+.hands-free-row strong { color: #b8bed3; font-size: 9px; font-weight: 650; }
+.hands-free-row small { margin-top: 3px; overflow: hidden; color: #56617f; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.hands-free-row .hands-free-toggle { position: relative; width: 34px; height: 18px; flex: 0 0 auto; padding: 0; border: 1px solid rgba(91, 104, 180, 0.3); border-radius: 999px; background: #1b2046; cursor: pointer; transition: 160ms ease; }
+.hands-free-toggle span { position: absolute; width: 12px; height: 12px; left: 2px; top: 2px; border-radius: 50%; background: #69728f; transition: 160ms ease; }
+.hands-free-row .hands-free-toggle--on { border-color: rgba(31, 202, 219, 0.5); background: rgba(18, 155, 178, 0.25); box-shadow: 0 0 10px rgba(24, 197, 216, 0.12); }
+.hands-free-toggle--on span { left: 18px; background: #28d0df; box-shadow: 0 0 7px rgba(40, 208, 223, 0.5); }
+.microphone-control label { display: block; margin-bottom: 7px; color: #1abbd0; font-size: 8px; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; }
+.microphone-control select { width: 100%; padding: 8px 9px; overflow: hidden; border: 1px solid rgba(85, 100, 185, 0.18); border-radius: 0; outline: 0; color: #b8bed2; background: #171c3d; font-size: 9px; text-overflow: ellipsis; }
+.microphone-control select:disabled { opacity: 0.55; }
+.input-meter { display: flex; height: 22px; margin-top: 9px; align-items: flex-end; gap: 3px; }
+.input-meter span { height: 5px; flex: 1; background: rgba(75, 87, 145, 0.3); transition: height 80ms linear, background 80ms linear, box-shadow 80ms linear; }
+.input-meter span:nth-child(n+5) { height: 8px; }
+.input-meter span:nth-child(n+9) { height: 12px; }
+.input-meter .input-meter__bar--active { height: 18px; background: #20c5d8; box-shadow: 0 0 7px rgba(32, 197, 216, 0.45); }
+.input-meter .input-meter__bar--active:nth-child(n+9) { background: #db58c6; box-shadow: 0 0 7px rgba(219, 88, 198, 0.45); }
+.microphone-control small { display: block; margin-top: 6px; color: #596382; font-size: 7px; }
+.microphone-control .microphone-warning { color: #e083a2; }
 
 .quick-heading { display: flex; align-items: flex-end; justify-content: space-between; margin: 28px 0 12px; }
 .quick-heading span { color: #d3d6e7; font-size: 12px; font-weight: 550; }
@@ -267,6 +290,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #22c8e8; outline-
 @keyframes wave-surge { from { transform: scaleY(0.72); } to { transform: scaleY(1.35); } }
 @keyframes particle-flicker { from { opacity: 0.22; transform: scale(0.7); } to { opacity: 1; transform: scale(1.45); } }
 @keyframes orb-breathe { 50% { transform: scale(1.018); filter: brightness(1.16); } }
+@keyframes live-caption { from { opacity: 0.45; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
 
 @media (max-width: 1180px) {
   .command-console { min-height: 620px; }

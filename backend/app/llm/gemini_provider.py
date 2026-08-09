@@ -91,6 +91,7 @@ class GeminiProvider(LLMProvider):
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             tools=[_to_gemini_tool(tools)] if tools else None,
+            thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
         )
 
         response = await self.client.aio.models.generate_content(

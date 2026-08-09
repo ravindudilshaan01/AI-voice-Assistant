@@ -62,7 +62,7 @@ function getIntent(text: string, toolName?: string | null): string {
 }
 
 function VoiceOrb({ status, onClick }: { status: AssistantStatus; onClick: () => void }) {
-  const disabled = status === "connecting" || status === "thinking" || status === "speaking";
+  const disabled = status === "connecting" || status === "thinking";
   const particles = useMemo(
     () => Array.from({ length: 28 }, (_, index) => ({
       left: `${12 + ((index * 31) % 76)}%`,
@@ -98,7 +98,15 @@ export function VoiceAssistant() {
     messages,
     currentToolActivity,
     lastToolName,
+    liveTranscript,
+    liveTranscriptionSupported,
+    inputLevel,
+    audioInputDevices,
+    selectedAudioInputId,
+    alwaysListening,
     errorMessage,
+    setSelectedAudioInputId,
+    setAlwaysListening,
     startRecording,
     stopRecording,
     sendTextMessage,
@@ -117,6 +125,7 @@ export function VoiceAssistant() {
   const latestAssistant = assistantMessages[assistantMessages.length - 1]?.text ?? "";
   const recentCommands = userMessages.slice(-6).reverse();
   const isBusy = status === "connecting" || status === "thinking" || status === "speaking";
+  const commandPreview = status === "recording" ? liveTranscript : latestUser;
 
   useEffect(() => {
     if (status !== "recording") {
@@ -130,6 +139,11 @@ export function VoiceAssistant() {
   const handleOrb = () => {
     if (status === "recording") {
       stopRecording();
+      return;
+    }
+    if (status === "speaking") {
+      setLastInputMode("Voice");
+      void startRecording();
       return;
     }
     if (!isBusy) {
@@ -197,9 +211,21 @@ export function VoiceAssistant() {
             <div className="stage-kicker"><span /> NEURAL VOICE INTERFACE <span /></div>
             <VoiceOrb status={status} onClick={handleOrb} />
             <div className="voice-copy" aria-live="polite">
-              <p className="heard-command">{latestUser ? `“${latestUser}”` : "Ask anything, naturally"}</p>
+              <p className={`heard-command ${status === "recording" ? "heard-command--live" : ""}`}>
+                {commandPreview
+                  ? `“${commandPreview}”`
+                  : status === "recording"
+                    ? liveTranscriptionSupported
+                      ? "Speak now — your words will appear here"
+                      : "Listening — final text will appear when you stop"
+                    : "Ask anything, naturally"}
+              </p>
               <h1>{STATUS_COPY[status].label}</h1>
-              <p>{currentToolActivity ?? STATUS_COPY[status].hint}</p>
+              <p>
+                {status === "recording" && liveTranscript
+                  ? "Live draft · Final text improves when you stop"
+                  : currentToolActivity ?? STATUS_COPY[status].hint}
+              </p>
               {status === "recording" && <span className="recording-clock">00:{recordingSeconds.toString().padStart(2, "0")}</span>}
             </div>
 
@@ -224,6 +250,45 @@ export function VoiceAssistant() {
               <div><dt>Session results</dt><dd>{assistantMessages.length} responses</dd></div>
               <div><dt>Active process</dt><dd className="accent-value">{currentToolActivity ?? STATUS_COPY[status].label}</dd></div>
             </dl>
+
+            <div className="microphone-control">
+              <div className="hands-free-row">
+                <div><strong>Always listening</strong><small>Auto-stop on silence · Barge in enabled</small></div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={alwaysListening}
+                  className={alwaysListening ? "hands-free-toggle hands-free-toggle--on" : "hands-free-toggle"}
+                  onClick={() => setAlwaysListening(!alwaysListening)}
+                ><span /></button>
+              </div>
+              <label htmlFor="microphone-input">Microphone input</label>
+              <select
+                id="microphone-input"
+                value={selectedAudioInputId}
+                onChange={(event) => setSelectedAudioInputId(event.target.value)}
+                disabled={isBusy || status === "recording"}
+              >
+                {audioInputDevices.length === 0 && <option value="">Default microphone</option>}
+                {audioInputDevices.map((device, index) => (
+                  <option value={device.deviceId} key={device.deviceId || `microphone-${index}`}>
+                    {device.label || `Microphone ${index + 1}`}
+                  </option>
+                ))}
+              </select>
+              <div className="input-meter" aria-label={`Microphone level ${Math.round(inputLevel * 100)} percent`}>
+                {Array.from({ length: 12 }, (_, index) => (
+                  <span className={inputLevel >= (index + 1) / 12 ? "input-meter__bar--active" : ""} key={index} />
+                ))}
+              </div>
+              <small className={status === "recording" && inputLevel < 0.035 ? "microphone-warning" : ""}>
+                {status === "recording"
+                  ? inputLevel < 0.035
+                    ? "No voice signal — choose another microphone"
+                    : "Voice signal detected"
+                  : "The meter should move while you speak"}
+              </small>
+            </div>
 
             <div className="quick-heading"><span>Quick launch</span><small>Suggested commands</small></div>
             <div className="quick-list">

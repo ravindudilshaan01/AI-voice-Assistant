@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent import Agent
 from app.config import settings
-from app.stt import transcribe
+from app.stt import AudioTooQuietError, transcribe
 from app.tts import synthesize
 
 logging.basicConfig(level=logging.INFO)
@@ -129,6 +129,11 @@ async def voice_socket(websocket: WebSocket):
                     try:
                         transcript = await transcribe(bytes(audio_buffer))
                         audio_buffer.clear()
+                    except AudioTooQuietError as exc:
+                        audio_buffer.clear()
+                        logger.warning("Rejected unusable microphone audio: %s", exc)
+                        await websocket.send_json({"type": "error", "message": str(exc)})
+                        continue
                     except Exception as exc:
                         audio_buffer.clear()
                         logger.error("Transcription failed: %s", exc)
