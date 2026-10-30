@@ -1,7 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
 .env
-frontend/node_modules/
-frontend/dist/
-backend/__pycache__/
-backend/**/*.pyc
+.venv/
+venv/
+__pycache__/
+*.py[cod]
 .pytest_cache/
 .DS_Store
+.local-backup-before-pull/
