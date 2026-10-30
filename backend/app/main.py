@@ -1,163 +1,137 @@
+import asyncio
 import json
-import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.agent import Agent
-from app.config import settings
-from app.stt import AudioTooQuietError, transcribe
-from app.tts import synthesize
+from app.agents.voice_agent import stream_agent
+from app.config import FRONTEND_ORIGIN
+from app.services.groq_errors import ServiceError
+from app.services.llm import MAX_TEXT_CHARS, MAX_TURNS
+from app.services.speech_session import SpeechSession
+from app.services.stt import MAX_AUDIO_BYTES, SUPPORTED_MIME_TYPES, transcribe
+from app.services.tts import SentenceSegmenter
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("voice-assistant")
-
-app = FastAPI(title="AI Voice Assistant")
-
+app = FastAPI(title="NOVA AI API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_methods=["*"],
+    allow_origins=[FRONTEND_ORIGIN],
+    allow_credentials=False,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
-agent = Agent()
-
-
-async def process_turn(
-    websocket: WebSocket,
-    transcript: str,
-    conversation: list[dict],
-) -> None:
-    """Run one text or voice turn through the shared assistant pipeline."""
-    await websocket.send_json({"type": "transcript", "text": transcript})
-    conversation.append({"role": "user", "content": transcript})
-
-    try:
-        reply_text = ""
-        async for event in agent.respond_stream(conversation):
-            if event["type"] in ("tool_call", "tool_result"):
-                await websocket.send_json(event)
-            elif event["type"] == "final":
-                reply_text = event["text"]
-    except Exception as exc:
-        logger.exception("Agent error")
-        err_str = str(exc)
-        if "leak" in err_str.lower() or "permission_denied" in err_str.lower() or "403" in err_str:
-            message = "The Gemini API key is invalid or disabled. Update GEMINI_API_KEY and try again."
-        elif any(
-            marker in err_str.lower()
-            for marker in ("429", "quota", "rate", "resource_exhausted")
-        ):
-            message = "Gemini rate limit reached. Please wait a moment and try again."
-        else:
-            message = "The assistant could not generate a response. Please try again."
-        await websocket.send_json({"type": "error", "message": message})
-        await websocket.send_json({"type": "done"})
-        return
-
-    conversation.append({"role": "assistant", "content": reply_text})
-    await websocket.send_json({"type": "assistant_text", "text": reply_text})
-
-    try:
-        mp3_bytes = await synthesize(reply_text)
-        await websocket.send_bytes(mp3_bytes)
-    except Exception:
-        logger.exception("TTS failed")
-        await websocket.send_json(
-            {
-                "type": "tts_error",
-                "message": "The answer is ready, but voice playback is unavailable.",
-            }
-        )
-
-    await websocket.send_json({"type": "done"})
-
 
 @app.get("/health")
-async def health():
-    return {"status": "ok", "llm_provider": settings.llm_provider}
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 
-@app.websocket("/ws/voice")
-async def voice_socket(websocket: WebSocket):
-    """
-    Protocol (binary + text frames on one socket):
-      - Client sends binary audio chunks (webm/opus) as the user speaks.
-      - Client sends {"type": "end_utterance"} text frame when the user stops talking.
-      - Or client sends {"type": "text_message", "text": "..."} for typed chat.
-      - Server transcribes the buffered audio, runs the agent loop, synthesizes
-        speech, and sends back:
-          {"type": "transcript", "text": "..."}                        (text frame)
-          {"type": "tool_call", "name": "...", "arguments": {...}}      (text frame, 0+ times)
-          {"type": "tool_result", "name": "...", "result": "..."}       (text frame, 0+ times)
-          {"type": "assistant_text", "text": "..."}                     (text frame)
-          <binary mp3 audio>                                            (binary frame)
-          {"type": "done"}                                              (text frame)
-    """
+async def answer(speech: SpeechSession, history: list[dict[str, str]], text: str, request_id: str, speak: bool) -> None:
+    await speech.start(request_id, speak)
+    await speech.send_json({"type": "chat_started", "requestId": request_id, "speak": speak})
+    parts: list[str] = []
+    segmenter = SentenceSegmenter()
+    try:
+        async for event in stream_agent(history, text):
+            if event["type"] == "chat_delta":
+                parts.append(event["text"])
+                if speak:
+                    for segment in segmenter.feed(event["text"]):
+                        speech.enqueue(segment)
+            await speech.send_json({**event, "requestId": request_id})
+        response = "".join(parts).strip()
+        if not response:
+            raise ServiceError("NOVA returned an empty answer. Please try again.")
+        if speak:
+            for segment in segmenter.flush():
+                speech.enqueue(segment)
+            speech.finish()
+        history.extend(({"role": "user", "content": text}, {"role": "assistant", "content": response}))
+        del history[: max(0, len(history) - MAX_TURNS * 2)]
+        await speech.send_json({"type": "chat_done", "requestId": request_id})
+    except ServiceError as error:
+        await speech.stop()
+        await speech.send_json({"type": "error", "requestId": request_id, "message": str(error)})
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin != FRONTEND_ORIGIN:
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
-    logger.info("Client connected")
-
-    audio_buffer = bytearray()
-    conversation: list[dict] = []
-
+    speech = SpeechSession(websocket)
+    await speech.send_json({"type": "connection", "status": "connected"})
+    history: list[dict[str, str]] = []
     try:
         while True:
-            message = await websocket.receive()
-
-            if message.get("type") == "websocket.disconnect":
+            packet = await websocket.receive()
+            if packet["type"] == "websocket.disconnect":
                 break
-
-            if "bytes" in message and message["bytes"] is not None:
-                audio_buffer.extend(message["bytes"])
+            if packet.get("bytes") is not None:
+                await speech.send_json({"type": "error", "message": "Send audio metadata before audio data."})
                 continue
-
-            if "text" in message and message["text"] is not None:
-                try:
-                    payload = json.loads(message["text"])
-                except json.JSONDecodeError:
-                    await websocket.send_json(
-                        {"type": "error", "message": "Invalid message format."}
-                    )
+            try:
+                message = json.loads(packet.get("text") or "")
+            except (ValueError, TypeError):
+                await speech.send_json({"type": "error", "message": "Expected a JSON message."})
+                continue
+            if not isinstance(message, dict):
+                await speech.send_json({"type": "error", "message": "Expected a JSON object."})
+                continue
+            kind = message.get("type")
+            request_id = message.get("requestId")
+            if kind == "ping":
+                await speech.send_json({"type": "pong"})
+            elif kind == "clear":
+                await speech.stop()
+                history.clear()
+                await speech.send_json({"type": "cleared"})
+            elif kind == "stop_speaking":
+                await speech.stop()
+                await speech.send_json({"type": "tts_stopped"})
+            elif kind == "message" and isinstance(message.get("text"), str) and isinstance(request_id, str):
+                text = message["text"].strip()
+                if len(text) > MAX_TEXT_CHARS:
+                    await speech.send_json({"type": "error", "requestId": request_id, "message": "Message is too long. Please shorten it."})
+                elif text:
+                    await answer(speech, history, text, request_id, message.get("speak") is not False)
+                else:
+                    await speech.send_json({"type": "error", "requestId": request_id, "message": "Message cannot be empty."})
+            elif kind == "audio_start" and isinstance(request_id, str):
+                mime_type = message.get("mimeType")
+                if not isinstance(mime_type, str) or mime_type.split(";", 1)[0].lower() not in SUPPORTED_MIME_TYPES:
+                    await speech.send_json({"type": "error", "requestId": request_id, "message": "Unsupported recording format."})
                     continue
-
-                if payload.get("type") == "end_utterance":
-                    if not audio_buffer:
-                        await websocket.send_json({"type": "error", "message": "No audio received."})
-                        continue
-
-                    try:
-                        transcript = await transcribe(bytes(audio_buffer))
-                        audio_buffer.clear()
-                    except AudioTooQuietError as exc:
-                        audio_buffer.clear()
-                        logger.warning("Rejected unusable microphone audio: %s", exc)
-                        await websocket.send_json({"type": "error", "message": str(exc)})
-                        continue
-                    except Exception as exc:
-                        audio_buffer.clear()
-                        logger.error("Transcription failed: %s", exc)
-                        await websocket.send_json({"type": "error", "message": f"Transcription failed: {exc}"})
-                        continue
-
-                    if not transcript:
-                        await websocket.send_json({"type": "error", "message": "Could not transcribe audio — please speak clearly and try again."})
-                        continue
-
-                    await process_turn(websocket, transcript, conversation)
-
-                elif payload.get("type") == "text_message":
-                    text = str(payload.get("text", "")).strip()
-                    if not text:
-                        await websocket.send_json(
-                            {"type": "error", "message": "Please enter a message."}
-                        )
-                        continue
-                    await process_turn(websocket, text, conversation)
-
-                elif payload.get("type") == "reset_conversation":
-                    conversation.clear()
-                    audio_buffer.clear()
-
+                size = message.get("size")
+                if not isinstance(size, int) or size < 1 or size > MAX_AUDIO_BYTES:
+                    await speech.send_json({"type": "error", "requestId": request_id, "message": "Recording is empty or too large."})
+                    continue
+                try:
+                    audio_packet = await asyncio.wait_for(websocket.receive(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    await speech.send_json({"type": "error", "requestId": request_id, "message": "Audio upload timed out. Please try again."})
+                    continue
+                if audio_packet["type"] == "websocket.disconnect":
+                    break
+                audio = audio_packet.get("bytes")
+                if audio is None or len(audio) != size:
+                    await speech.send_json({"type": "error", "requestId": request_id, "message": "Audio upload was incomplete. Please try again."})
+                    continue
+                try:
+                    text = await transcribe(audio, mime_type)
+                    if len(text) > MAX_TEXT_CHARS:
+                        raise ServiceError("Transcription is too long. Please record a shorter message.")
+                    await speech.send_json({"type": "transcript", "requestId": request_id, "text": text})
+                    await answer(speech, history, text, request_id, message.get("speak") is not False)
+                except ServiceError as error:
+                    await speech.send_json({"type": "error", "requestId": request_id, "message": str(error)})
+            else:
+                await speech.send_json({"type": "error", "message": "Unsupported message."})
     except WebSocketDisconnect:
-        logger.info("Client disconnected")
+        pass
+    finally:
+        await speech.stop()

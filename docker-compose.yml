@@ -4,39 +4,21 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.6-flash}
-      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small.en}
-      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
-      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
-      - WHISPER_BEAM_SIZE=${WHISPER_BEAM_SIZE:-5}
-      - EDGE_TTS_VOICE=${EDGE_TTS_VOICE:-en-US-AriaNeural}
-      - CORS_ORIGINS=http://localhost:5173
-    volumes:
-      - whisper_cache:/root/.cache/huggingface
+      - GROQ_API_KEY=${GROQ_API_KEY:?Add GROQ_API_KEY to .env}
+      - GROQ_LLM_MODEL=${GROQ_LLM_MODEL:-llama-3.1-8b-instant}
+      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-http://localhost:5173}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   frontend:
     build: ./frontend
     ports:
       - "5173:5173"
     environment:
-      - VITE_WS_URL=ws://localhost:8000/ws/voice
+      - VITE_WS_URL=${VITE_WS_URL:-ws://localhost:8000/ws}
     depends_on:
-      - backend
-
-# Optional: only add this back if you want to test the Ollama path too.
-# ollama:
-#   image: ollama/ollama:latest
-#   ports:
-#     - "11434:11434"
-#   volumes:
-#     - ollama_models:/root/.ollama
-#
-# volumes:
-#   ollama_models:
-
-volumes:
-  whisper_cache:
+      backend:
+        condition: service_healthy
