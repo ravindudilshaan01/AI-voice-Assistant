@@ -79,16 +79,39 @@ class ProtocolTests(unittest.TestCase):
     def test_stt_uses_recorded_format_and_rejects_oversize(self):
         with patch("app.services.stt.groq_api_key", return_value="test-key"), \
              patch("app.services.stt.AsyncGroq") as client_factory:
-            create = AsyncMock(return_value=SimpleNamespace(text="  Hello  "))
+            create = AsyncMock(return_value=SimpleNamespace(text="  Hello  ", no_speech_prob=0.01, avg_logprob=-0.1))
             client_factory.return_value.__aenter__.return_value.audio.transcriptions.create = create
             self.assertEqual(asyncio.run(transcribe(b"audio", "audio/ogg;codecs=opus")), "Hello")
             create.assert_awaited_once_with(
                 model="whisper-large-v3-turbo",
                 file=("recording.ogg", b"audio", "audio/ogg;codecs=opus"),
-                response_format="json",
+                response_format="verbose_json",
+                temperature=0,
+                language="en",
             )
             with self.assertRaises(ServiceError):
                 asyncio.run(transcribe(b"x" * (MAX_AUDIO_BYTES + 1), "audio/ogg"))
+
+    def test_stt_rejects_low_confidence_without_calling_agent(self):
+        async def fail_agent(history, text):
+            raise AssertionError("low-confidence transcript reached the agent")
+            yield  # pragma: no cover
+
+        with patch("app.services.stt.groq_api_key", return_value="test-key"), \
+             patch("app.services.stt.AsyncGroq") as client_factory, \
+             patch("app.main.stream_agent", fail_agent), \
+             TestClient(app) as client:
+            client_factory.return_value.__aenter__.return_value.audio.transcriptions.create = AsyncMock(
+                return_value=SimpleNamespace(text="Thank you", no_speech_prob=0.995, avg_logprob=-3.0)
+            )
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                audio = b"background noise"
+                ws.send_json({"type": "audio_start", "requestId": "quiet", "mimeType": "audio/webm", "size": len(audio), "speak": False})
+                ws.send_bytes(audio)
+                event = ws.receive_json()
+                self.assertEqual(event["type"], "error")
+                self.assertIn("No clear speech", event["message"])
 
 
 if __name__ == "__main__":

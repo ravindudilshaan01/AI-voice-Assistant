@@ -5,4 +5,5 @@
 .playback-controls button:disabled{opacity:.45;cursor:default}
 .microphone-select{display:flex;align-items:center;justify-content:center;gap:9px;margin:12px auto 0;color:#9298b3;font-size:12px}
 .microphone-select select{max-width:260px;border:1px solid #ffffff25;background:#1b2033;color:#d9dcf1;padding:8px 10px;border-radius:9px}
+.debug-panel{margin:14px 0;padding:12px 16px;border:1px solid #ffffff17;border-radius:12px;color:#9298b3;font-size:12px}.debug-panel button{border:1px solid #ffffff25;background:#1b2033;color:#d9dcf1;padding:7px 10px;border-radius:8px;cursor:pointer}.debug-panel audio{display:block;max-width:100%;margin-top:10px}.debug-panel p{margin:8px 0}
 @media(max-width:600px){.playback-status{width:100%;text-align:center}}

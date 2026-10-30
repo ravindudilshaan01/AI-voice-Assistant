@@ -10,6 +10,7 @@ export type ServerEvent =
   | { type: 'tts_complete'; responseId: string; segmentCount: number }
   | { type: 'tts_stopped' }
   | { type: 'transcript'; requestId: string; text: string }
+  | { type: 'transcript_only'; requestId: string; text: string }
   | { type: 'cleared' }
   | { type: 'pong' }
   | { type: 'error'; message: string; requestId?: string }
@@ -81,10 +82,10 @@ export class NovaWebSocket {
     return true
   }
 
-  async sendAudio(blob: Blob, mimeType: string, requestId: string, speak = true): Promise<boolean> {
+  async sendAudio(blob: Blob, mimeType: string, requestId: string, speak = true, transcribeOnly = false): Promise<boolean> {
     const data = await blob.arrayBuffer()
     if (this.socket?.readyState !== WebSocket.OPEN) return false
-    this.socket.send(JSON.stringify({ type: 'audio_start', mimeType, size: data.byteLength, requestId, speak }))
+    this.socket.send(JSON.stringify({ type: 'audio_start', mimeType, size: data.byteLength, requestId, speak, transcribeOnly }))
     this.socket.send(data)
     return true
   }
@@ -129,6 +130,7 @@ function isServerEvent(value: unknown): value is ServerEvent {
     (event.type === 'tts_complete' && typeof event.responseId === 'string' && Number.isInteger(event.segmentCount)) ||
     event.type === 'tts_stopped' ||
     (event.type === 'transcript' && typeof event.requestId === 'string' && typeof event.text === 'string') ||
+    (event.type === 'transcript_only' && typeof event.requestId === 'string' && typeof event.text === 'string') ||
     event.type === 'cleared' ||
     event.type === 'pong' ||
     (event.type === 'error' && typeof event.message === 'string' &&

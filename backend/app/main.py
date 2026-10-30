@@ -125,8 +125,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     text = await transcribe(audio, mime_type)
                     if len(text) > MAX_TEXT_CHARS:
                         raise ServiceError("Transcription is too long. Please record a shorter message.")
-                    await speech.send_json({"type": "transcript", "requestId": request_id, "text": text})
-                    await answer(speech, history, text, request_id, message.get("speak") is not False)
+                    if message.get("transcribeOnly"):
+                        await speech.send_json({"type": "transcript_only", "requestId": request_id, "text": text})
+                    else:
+                        await speech.send_json({"type": "transcript", "requestId": request_id, "text": text})
+                        await answer(speech, history, text, request_id, message.get("speak") is not False)
                 except ServiceError as error:
                     await speech.send_json({"type": "error", "requestId": request_id, "message": str(error)})
             else:
