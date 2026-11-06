@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import suppress
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +11,7 @@ from app.services.groq_errors import ServiceError
 from app.services.llm import MAX_TEXT_CHARS, MAX_TURNS
 from app.services.speech_session import SpeechSession
 from app.services.stt import MAX_AUDIO_BYTES, SUPPORTED_MIME_TYPES, transcribe
-from app.services.tts import SentenceSegmenter
+from app.services.tts import SUPPORTED_TTS_VOICES, TTS_VOICE, SentenceSegmenter
 
 app = FastAPI(title="NOVA AI API")
 app.add_middleware(
@@ -27,8 +28,8 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-async def answer(speech: SpeechSession, history: list[dict[str, str]], text: str, request_id: str, speak: bool) -> None:
-    await speech.start(request_id, speak)
+async def answer(speech: SpeechSession, history: list[dict[str, str]], text: str, request_id: str, speak: bool, voice: str = TTS_VOICE) -> None:
+    await speech.start(request_id, speak, voice)
     await speech.send_json({"type": "chat_started", "requestId": request_id, "speak": speak})
     parts: list[str] = []
     segmenter = SentenceSegmenter()
@@ -62,10 +63,50 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=1008)
         return
 
-    await websocket.accept()
-    speech = SpeechSession(websocket)
-    await speech.send_json({"type": "connection", "status": "connected"})
+    try:
+        await websocket.accept()
+        speech = SpeechSession(websocket)
+        await speech.send_json({"type": "connection", "status": "connected"})
+    except (RuntimeError, OSError, WebSocketDisconnect):
+        return
     history: list[dict[str, str]] = []
+    active_answer: asyncio.Task[None] | None = None
+    active_request_id = ""
+
+    async def cancel_answer(notify: bool = True) -> None:
+        nonlocal active_answer, active_request_id
+        if active_answer is None:
+            return
+        if active_answer.done():
+            with suppress(Exception):
+                await active_answer
+            active_answer = None
+            active_request_id = ""
+            return
+        request_id = active_request_id
+        active_answer.cancel()
+        with suppress(asyncio.CancelledError):
+            await active_answer
+        active_answer = None
+        active_request_id = ""
+        await speech.stop()
+        if notify:
+            await speech.send_json({"type": "chat_cancelled", "requestId": request_id})
+
+    async def start_answer(text: str, request_id: str, speak: bool, voice: str = TTS_VOICE) -> None:
+        nonlocal active_answer, active_request_id
+        if active_answer is not None and not active_answer.done():
+            await speech.send_json({"type": "error", "requestId": request_id, "message": "NOVA is already answering. Stop the current response first."})
+            return
+        if active_answer is not None:
+            with suppress(Exception):
+                await active_answer
+        active_request_id = request_id
+        active_answer = asyncio.create_task(answer(speech, history, text, request_id, speak, voice))
+
+    def selected_voice(message: dict) -> str:
+        voice = message.get("voice")
+        return voice if isinstance(voice, str) and voice in SUPPORTED_TTS_VOICES else TTS_VOICE
     try:
         while True:
             packet = await websocket.receive()
@@ -87,9 +128,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             if kind == "ping":
                 await speech.send_json({"type": "pong"})
             elif kind == "clear":
+                await cancel_answer(notify=False)
                 await speech.stop()
                 history.clear()
                 await speech.send_json({"type": "cleared"})
+            elif kind == "stop_generation":
+                await cancel_answer()
             elif kind == "stop_speaking":
                 await speech.stop()
                 await speech.send_json({"type": "tts_stopped"})
@@ -98,7 +142,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 if len(text) > MAX_TEXT_CHARS:
                     await speech.send_json({"type": "error", "requestId": request_id, "message": "Message is too long. Please shorten it."})
                 elif text:
-                    await answer(speech, history, text, request_id, message.get("speak") is not False)
+                    await start_answer(text, request_id, message.get("speak") is not False, selected_voice(message))
                 else:
                     await speech.send_json({"type": "error", "requestId": request_id, "message": "Message cannot be empty."})
             elif kind == "audio_start" and isinstance(request_id, str):
@@ -129,7 +173,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         await speech.send_json({"type": "transcript_only", "requestId": request_id, "text": text})
                     else:
                         await speech.send_json({"type": "transcript", "requestId": request_id, "text": text})
-                        await answer(speech, history, text, request_id, message.get("speak") is not False)
+                        await start_answer(text, request_id, message.get("speak") is not False, selected_voice(message))
                 except ServiceError as error:
                     await speech.send_json({"type": "error", "requestId": request_id, "message": str(error)})
             else:
@@ -137,4 +181,5 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        await cancel_answer(notify=False)
         await speech.stop()

@@ -5,7 +5,9 @@ export type ServerEvent =
   | { type: 'chat_started'; requestId: string; speak?: boolean }
   | { type: 'chat_delta'; requestId: string; text: string }
   | { type: 'chat_done'; requestId: string }
-  | { type: 'tool_activity'; requestId: string; label: string; state: 'started' | 'done' }
+  | { type: 'chat_cancelled'; requestId: string }
+  | { type: 'tool_activity'; requestId: string; name: string; label: string; state: 'started' | 'done' }
+  | { type: 'tool_result'; requestId: string; name: string; label: string; ok: boolean; result?: Record<string, unknown>; error?: string }
   | { type: 'tts_fallback'; responseId: string; segmentId: string; index: number; text: string; message: string }
   | { type: 'tts_complete'; responseId: string; segmentCount: number }
   | { type: 'tts_stopped' }
@@ -76,16 +78,16 @@ export class NovaWebSocket {
     socket.onerror = () => socket.close()
   }
 
-  sendMessage(text: string, requestId: string, speak = true): boolean {
+  sendMessage(text: string, requestId: string, speak = true, voice = 'troy'): boolean {
     if (this.socket?.readyState !== WebSocket.OPEN) return false
-    this.socket.send(JSON.stringify({ type: 'message', text, requestId, speak }))
+    this.socket.send(JSON.stringify({ type: 'message', text, requestId, speak, voice }))
     return true
   }
 
-  async sendAudio(blob: Blob, mimeType: string, requestId: string, speak = true, transcribeOnly = false): Promise<boolean> {
+  async sendAudio(blob: Blob, mimeType: string, requestId: string, speak = true, transcribeOnly = false, voice = 'troy'): Promise<boolean> {
     const data = await blob.arrayBuffer()
     if (this.socket?.readyState !== WebSocket.OPEN) return false
-    this.socket.send(JSON.stringify({ type: 'audio_start', mimeType, size: data.byteLength, requestId, speak, transcribeOnly }))
+    this.socket.send(JSON.stringify({ type: 'audio_start', mimeType, size: data.byteLength, requestId, speak, transcribeOnly, voice }))
     this.socket.send(data)
     return true
   }
@@ -100,6 +102,24 @@ export class NovaWebSocket {
     if (this.socket?.readyState !== WebSocket.OPEN) return false
     this.socket.send(JSON.stringify({ type: 'stop_speaking' }))
     return true
+  }
+
+  stopGeneration(): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false
+    this.socket.send(JSON.stringify({ type: 'stop_generation' }))
+    return true
+  }
+
+  retry(): void {
+    if (this.state === 'connected') return
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = null
+    if (this.socket) {
+      const socket = this.socket
+      this.socket = null
+      socket.close()
+    }
+    this.connect()
   }
 
   disconnect(): void {
@@ -125,7 +145,11 @@ function isServerEvent(value: unknown): value is ServerEvent {
     (event.type === 'chat_started' && typeof event.requestId === 'string') ||
     (event.type === 'chat_delta' && typeof event.requestId === 'string' && typeof event.text === 'string') ||
     (event.type === 'chat_done' && typeof event.requestId === 'string') ||
-    (event.type === 'tool_activity' && typeof event.requestId === 'string' && typeof event.label === 'string' && (event.state === 'started' || event.state === 'done')) ||
+    (event.type === 'chat_cancelled' && typeof event.requestId === 'string') ||
+    (event.type === 'tool_activity' && typeof event.requestId === 'string' && typeof event.name === 'string' && typeof event.label === 'string' && (event.state === 'started' || event.state === 'done')) ||
+    (event.type === 'tool_result' && typeof event.requestId === 'string' && typeof event.name === 'string' && typeof event.label === 'string' && typeof event.ok === 'boolean' &&
+      (event.result === undefined || (typeof event.result === 'object' && event.result !== null)) &&
+      (event.error === undefined || typeof event.error === 'string')) ||
     (event.type === 'tts_fallback' && typeof event.responseId === 'string' && typeof event.segmentId === 'string' && Number.isInteger(event.index) && typeof event.text === 'string') ||
     (event.type === 'tts_complete' && typeof event.responseId === 'string' && Number.isInteger(event.segmentCount)) ||
     event.type === 'tts_stopped' ||

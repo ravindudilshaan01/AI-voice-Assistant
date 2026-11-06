@@ -3,7 +3,7 @@ from time import monotonic
 
 from groq import AsyncGroq
 
-from app.config import GROQ_STT_LANGUAGE, GROQ_STT_MODEL, groq_api_key
+from app.config import GROQ_STT_LANGUAGE, GROQ_STT_MODEL, GROQ_STT_PROMPT, groq_api_key
 from app.services.groq_errors import ServiceError, friendly_error
 
 
@@ -62,6 +62,8 @@ async def transcribe(audio: bytes, mime_type: str) -> str:
             }
             if GROQ_STT_LANGUAGE != "auto":
                 request["language"] = GROQ_STT_LANGUAGE
+            if GROQ_STT_PROMPT:
+                request["prompt"] = GROQ_STT_PROMPT
             result = await client.audio.transcriptions.create(**request)
         text = _validated_text(result)
         logger.info("STT completed duration_ms=%d audio_bytes=%d mime_type=%s", round((monotonic() - started) * 1000), len(audio), mime_type.split(";", 1)[0])

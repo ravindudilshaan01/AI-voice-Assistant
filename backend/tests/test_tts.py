@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.services.groq_errors import ServiceError
 from app.services.speech_session import SpeechSession
-from app.services.tts import MAX_TTS_CHARS, SentenceSegmenter, generate_wav
+from app.services.tts import MAX_TTS_CHARS, TTS_VOICE, SentenceSegmenter, generate_wav
 
 
 WAV = b"RIFF" + (36).to_bytes(4, "little") + b"WAVE" + b"\x00" * 32
@@ -45,8 +45,14 @@ class TTSServiceTests(unittest.IsolatedAsyncioTestCase):
             result = await generate_wav("Hello there.")
             self.assertEqual(result, WAV)
             response.assert_awaited_once_with(
-                model="canopylabs/orpheus-v1-english", voice="troy",
+                model="canopylabs/orpheus-v1-english", voice=TTS_VOICE,
                 input="Hello there.", response_format="wav",
+            )
+            response.reset_mock()
+            self.assertEqual(await generate_wav("Hello again.", "autumn"), WAV)
+            response.assert_awaited_once_with(
+                model="canopylabs/orpheus-v1-english", voice="autumn",
+                input="Hello again.", response_format="wav",
             )
 
     async def test_too_long_or_internal_text_never_calls_sdk(self):
@@ -54,6 +60,8 @@ class TTSServiceTests(unittest.IsolatedAsyncioTestCase):
             for text in ("x" * 201, '{"tool_calls": []}', ""):
                 with self.assertRaises(ServiceError):
                     await generate_wav(text)
+            with self.assertRaises(ServiceError):
+                await generate_wav("Hello", "unsupported")
             client_factory.assert_not_called()
 
     async def test_audio_metadata_binary_order_and_fallback(self):
@@ -70,7 +78,7 @@ class TTSServiceTests(unittest.IsolatedAsyncioTestCase):
         websocket = FakeWebSocket()
         session = SpeechSession(websocket)
         with patch("app.services.speech_session.generate_wav", new=AsyncMock(return_value=WAV)) as synthesize:
-            await session.start("reply-1", True)
+            await session.start("reply-1", True, "autumn")
             session.enqueue("First sentence.")
             session.enqueue("Second sentence.")
             session.finish()
@@ -80,6 +88,7 @@ class TTSServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.frames[0][1]["segmentId"], "reply-1:0")
         self.assertEqual(websocket.frames[-1][1]["segmentCount"], 2)
         self.assertEqual(synthesize.await_count, 2)
+        self.assertEqual([call.args[1] for call in synthesize.await_args_list], ["autumn", "autumn"])
 
         websocket = FakeWebSocket()
         session = SpeechSession(websocket)
@@ -100,11 +109,11 @@ class SpeechProtocolTests(unittest.TestCase):
             yield {"type": "chat_delta", "text": " How are you?"}
 
         with patch("app.main.stream_agent", fake_agent), \
-             patch("app.services.speech_session.generate_wav", new=AsyncMock(return_value=WAV)), \
+             patch("app.services.speech_session.generate_wav", new=AsyncMock(return_value=WAV)) as synthesize, \
              TestClient(app) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.receive_json()
-                ws.send_json({"type": "message", "requestId": "spoken", "text": "Hi", "speak": True})
+                ws.send_json({"type": "message", "requestId": "spoken", "text": "Hi", "speak": True, "voice": "autumn"})
                 frames = []
                 while True:
                     raw = ws.receive()
@@ -120,4 +129,5 @@ class SpeechProtocolTests(unittest.TestCase):
                 self.assertEqual([frames[i]["segmentId"] for i in audio_positions], ["spoken:0", "spoken:1"])
                 self.assertTrue(all(frames[i + 1] == WAV for i in audio_positions))
                 self.assertIn("chat_done", [frame["type"] for frame in frames if isinstance(frame, dict)])
+                self.assertEqual([call.args[1] for call in synthesize.await_args_list], ["autumn", "autumn"])
                 ws.close()

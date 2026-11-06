@@ -5,6 +5,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.services.groq_errors import ServiceError
 from app.services.tts import generate_wav
+from app.services.tts import TTS_VOICE
 
 
 class SpeechSession:
@@ -17,6 +18,7 @@ class SpeechSession:
         self.queue: asyncio.Queue[str | None] | None = None
         self.response_id = ""
         self.segment_count = 0
+        self.voice = TTS_VOICE
 
     async def send_json(self, event: dict) -> None:
         async with self.send_lock:
@@ -37,13 +39,14 @@ class SpeechSession:
                 await pair
             raise
 
-    async def start(self, response_id: str, enabled: bool) -> None:
+    async def start(self, response_id: str, enabled: bool, voice: str = TTS_VOICE) -> None:
         await self.stop()
         self.response_id = response_id
         self.segment_count = 0
+        self.voice = voice
         self.queue = asyncio.Queue() if enabled else None
         if self.queue is not None:
-            self.task = asyncio.create_task(self._produce(response_id, self.queue))
+            self.task = asyncio.create_task(self._produce(response_id, self.queue, voice))
 
     def enqueue(self, text: str) -> None:
         if self.queue is not None:
@@ -62,7 +65,7 @@ class SpeechSession:
         self.task = None
         self.queue = None
 
-    async def _produce(self, response_id: str, queue: asyncio.Queue[str | None]) -> None:
+    async def _produce(self, response_id: str, queue: asyncio.Queue[str | None], voice: str) -> None:
         index = 0
         fallback = False
         try:
@@ -70,7 +73,7 @@ class SpeechSession:
                 segment_id = f"{response_id}:{index}"
                 if not fallback:
                     try:
-                        audio = await generate_wav(text)
+                        audio = await generate_wav(text, voice)
                         await self._send_audio({
                             "type": "tts_audio", "responseId": response_id,
                             "segmentId": segment_id, "index": index,

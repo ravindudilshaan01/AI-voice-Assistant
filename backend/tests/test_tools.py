@@ -71,8 +71,13 @@ class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
              patch("app.agents.voice_agent.execute_tool", new=AsyncMock(side_effect=[{"result": "4"}, {"temperature": 30}])) as execute:
             events = [event async for event in stream_agent([], "Calculate 2+2 and check Colombo weather")]
 
-        self.assertEqual([event["type"] for event in events],
-                         ["tool_activity"] * 4 + ["chat_delta"] * 2)
+        self.assertEqual([event["type"] for event in events], [
+            "tool_activity", "tool_result", "tool_activity",
+            "tool_activity", "tool_result", "tool_activity",
+            "chat_delta", "chat_delta",
+        ])
+        results = [event for event in events if event["type"] == "tool_result"]
+        self.assertEqual([event["name"] for event in results], ["calculate", "get_weather"])
         self.assertEqual("".join(event["text"] for event in events if event["type"] == "chat_delta"), "Four and sunny.")
         self.assertEqual(execute.await_args_list[0].args, ("calculate", '{"expression":"2+2"}'))
         self.assertEqual(execute.await_args_list[1].args, ("get_weather", '{"location":"Colombo"}'))
@@ -93,6 +98,14 @@ class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
             events = [event async for event in stream_agent([], "Hello")]
         self.assertEqual(events, [{"type": "chat_delta", "text": "Hello"}])
         self.assertEqual(fake.chat.completions.create.await_count, 1)
+        self.assertEqual(fake.chat.completions.create.await_args.kwargs["max_tokens"], 160)
+
+    async def test_explicit_explanation_gets_larger_response_budget(self):
+        fake = FakeGroq([chunks(chunk(content="A detailed answer"))])
+        with patch("app.agents.voice_agent.make_client", return_value=fake):
+            events = [event async for event in stream_agent([], "Explain this step by step")]
+        self.assertEqual(events[-1]["text"], "A detailed answer")
+        self.assertEqual(fake.chat.completions.create.await_args.kwargs["max_tokens"], 600)
 
     async def test_invalid_tool_arguments_are_returned_to_model(self):
         fake = FakeGroq([
@@ -138,6 +151,18 @@ class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.tools.weather.httpx.AsyncClient", return_value=client):
             with self.assertRaisesRegex(ToolError, "timed out"):
                 await get_weather("Colombo")
+
+    async def test_weather_rejects_ambiguous_misheard_location(self):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"results": [
+                {"name": "Gampa", "country": "India", "country_code": "IN", "latitude": 1, "longitude": 1},
+                {"name": "Gampa", "country": "Liberia", "country_code": "LR", "latitude": 2, "longitude": 2},
+            ]})
+        ))
+        with patch("app.tools.weather.httpx.AsyncClient", return_value=client), \
+             patch("app.tools.weather.WEATHER_PREFERRED_COUNTRY", "sri lanka"):
+            with self.assertRaisesRegex(ToolError, "specify the city and country"):
+                await get_weather("Gampa")
 
     async def test_web_search_returns_quick_answer(self):
         client = httpx.AsyncClient(transport=httpx.MockTransport(

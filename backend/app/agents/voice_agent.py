@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -11,9 +12,10 @@ from app.tools.registry import TOOL_SCHEMAS, TOOLS, execute_tool
 
 MAX_TOOL_ROUNDS = 3
 MAX_CALLS_PER_ROUND = 4
+DETAIL_REQUEST = re.compile(r"\b(?:explain|elaborate|detail|detailed|in-depth|step[- ]by[- ]step|why|how does|how do|compare|break down)\b", re.I)
 
 
-async def stream_agent(history: list[dict[str, str]], user_text: str) -> AsyncIterator[dict[str, str]]:
+async def stream_agent(history: list[dict[str, str]], user_text: str) -> AsyncIterator[dict[str, Any]]:
     """Stream text and tool activity. Tool messages live only within this request."""
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -30,7 +32,7 @@ async def stream_agent(history: list[dict[str, str]], user_text: str) -> AsyncIt
                     tools=TOOL_SCHEMAS,
                     tool_choice="auto" if round_number < MAX_TOOL_ROUNDS else "none",
                     stream=True,
-                    max_tokens=600,
+                    max_tokens=600 if DETAIL_REQUEST.search(user_text) else 160,
                 )
                 content_parts: list[str] = []
                 pending_calls: dict[int, dict[str, str]] = {}
@@ -71,7 +73,7 @@ async def stream_agent(history: list[dict[str, str]], user_text: str) -> AsyncIt
                 for call in calls:
                     name = call["name"]
                     label = TOOLS[name].label if name in TOOLS else "Using tool"
-                    yield {"type": "tool_activity", "label": label, "state": "started"}
+                    yield {"type": "tool_activity", "name": name, "label": label, "state": "started"}
                     try:
                         result = await execute_tool(name, call["arguments"])
                         payload = {"ok": True, "result": result}
@@ -83,7 +85,12 @@ async def stream_agent(history: list[dict[str, str]], user_text: str) -> AsyncIt
                         "role": "tool", "tool_call_id": call["id"], "name": name,
                         "content": json.dumps(payload),
                     })
-                    yield {"type": "tool_activity", "label": label, "state": "done"}
+                    yield {
+                        "type": "tool_result", "name": name, "label": label,
+                        "ok": payload["ok"],
+                        **({"result": payload["result"]} if payload["ok"] else {"error": payload["error"]}),
+                    }
+                    yield {"type": "tool_activity", "name": name, "label": label, "state": "done"}
     except ServiceError:
         raise
     except Exception as error:

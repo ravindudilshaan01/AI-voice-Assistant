@@ -4,7 +4,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Local development uses the repository-level .env as the shared source of truth.
+# backend/.env remains a fallback for running a copied backend by itself.
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / "backend" / ".env")
 
 
 def groq_api_key() -> str:
@@ -16,3 +20,10 @@ LLM_MODEL = os.getenv("GROQ_LLM_MODEL", "llama-3.1-8b-instant")
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 GROQ_STT_MODEL = os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo")
 GROQ_STT_LANGUAGE = os.getenv("GROQ_STT_LANGUAGE", "en").strip().lower() or "en"
+GROQ_STT_PROMPT = os.getenv(
+    "GROQ_STT_PROMPT",
+    "Sri Lankan English conversation. Place names may include Gampaha, Colombo, Kandy, Galle, Jaffna, and Sri Lanka.",
+).strip()
+GROQ_TTS_MODEL = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english").strip() or "canopylabs/orpheus-v1-english"
+GROQ_TTS_VOICE = os.getenv("GROQ_TTS_VOICE", "troy").strip().lower() or "troy"
+WEATHER_PREFERRED_COUNTRY = os.getenv("WEATHER_PREFERRED_COUNTRY", "").strip().casefold()

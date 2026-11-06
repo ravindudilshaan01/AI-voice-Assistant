@@ -1,5 +1,8 @@
+from difflib import SequenceMatcher
+
 import httpx
 
+from app.config import WEATHER_PREFERRED_COUNTRY
 from app.tools.errors import ToolError
 
 
@@ -36,14 +39,25 @@ async def get_weather(location: str, unit: str = "celsius") -> dict:
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=3.0)) as client:
-            geocode = await client.get(GEOCODING_URL, params={"name": location.strip(), "count": 1, "language": "en", "format": "json"})
+            geocode = await client.get(GEOCODING_URL, params={"name": location.strip(), "count": 5, "language": "en", "format": "json"})
             geocode.raise_for_status()
             places = geocode.json().get("results") or []
             if not places:
                 raise ToolError(f"No location found for {location.strip()}.")
-            place = places[0]
+            exact = [candidate for candidate in places if isinstance(candidate, dict) and str(candidate.get("name", "")).casefold() == location.split(",", 1)[0].strip().casefold()]
+            preferred = [candidate for candidate in places if isinstance(candidate, dict) and str(candidate.get("country", "")).casefold() == WEATHER_PREFERRED_COUNTRY]
+            if preferred:
+                place = preferred[0]
+            elif len({candidate.get("country_code") for candidate in exact}) > 1 and "," not in location:
+                raise ToolError(f"Multiple places match {location.strip()}. Please specify the city and country.")
+            else:
+                place = places[0]
             if not isinstance(place, dict):
                 raise ToolError("Weather service returned incomplete location data.")
+            requested_name = location.split(",", 1)[0].strip().casefold()
+            matched_name = str(place.get("name", "")).casefold()
+            if "," not in location and SequenceMatcher(None, requested_name, matched_name).ratio() < 0.72:
+                raise ToolError(f"The location {location.strip()} was not clear. Please provide the city and country.")
             forecast = await client.get(FORECAST_URL, params={
                 "latitude": place["latitude"],
                 "longitude": place["longitude"],

@@ -19,6 +19,10 @@ function fakeBrowser() {
   global.window = { SpeechSynthesisUtterance: global.SpeechSynthesisUtterance, speechSynthesis: {
     cancel: () => { cancelled++ },
     speak: (utterance) => spoken.push(utterance),
+    getVoices: () => [
+      { name: 'Microsoft David', lang: 'en-US' },
+      { name: 'Microsoft Zira', lang: 'en-US' },
+    ],
   } }
   global.URL.createObjectURL = () => `blob:segment-${players.length}`
   global.URL.revokeObjectURL = (url) => revoked.push(url)
@@ -74,5 +78,16 @@ test('browser speech fallback preserves text and advances queue', () => {
   assert.equal(browser.spoken[0].text, 'Hello there.')
   browser.spoken[0].onend()
   assert.equal(states.at(-1), 'idle')
+  player.dispose()
+})
+
+test('browser speech fallback honors the selected female voice', () => {
+  const browser = fakeBrowser()
+  const player = new AudioPlayback(() => {}, () => {})
+  player.setVoicePersona('female')
+  player.start('reply', true)
+  player.enqueueFallback('reply', 0, 'Hello there.')
+  player.complete('reply', 1)
+  assert.equal(browser.spoken[0].voice.name, 'Microsoft Zira')
   player.dispose()
 })

@@ -2,12 +2,13 @@ import re
 
 from groq import AsyncGroq
 
-from app.config import groq_api_key
+from app.config import GROQ_TTS_MODEL, GROQ_TTS_VOICE, groq_api_key
 from app.services.groq_errors import ServiceError, friendly_error
 
 
-TTS_MODEL = "canopylabs/orpheus-v1-english"
-TTS_VOICE = "troy"
+SUPPORTED_TTS_VOICES = {"troy", "autumn"}
+TTS_MODEL = GROQ_TTS_MODEL
+TTS_VOICE = GROQ_TTS_VOICE if GROQ_TTS_VOICE in SUPPORTED_TTS_VOICES else "troy"
 MAX_TTS_CHARS = 200
 SENTENCE_END = re.compile(r"(?<=[.!?])(?:\s+|$)")
 UNSPEAKABLE = re.compile(r"[{}]|```|\b(?:tool_calls|tool_call_id|parameters|function_call)\b", re.I)
@@ -115,17 +116,19 @@ class SentenceSegmenter:
         return split_long(spoken_text(remaining))
 
 
-async def generate_wav(text: str) -> bytes:
+async def generate_wav(text: str, voice: str = TTS_VOICE) -> bytes:
     clean = spoken_text(text)
     if not clean or len(clean) > MAX_TTS_CHARS:
         raise ServiceError("Speech segment is invalid or too long.")
+    if voice not in SUPPORTED_TTS_VOICES:
+        raise ServiceError("The selected voice is unavailable.")
     key = groq_api_key()
     if not key:
         raise ServiceError("Cloud speech is not configured.")
     try:
         async with AsyncGroq(api_key=key, timeout=20.0, max_retries=0) as client:
             response = await client.audio.speech.create(
-                model=TTS_MODEL, voice=TTS_VOICE, input=clean, response_format="wav"
+                model=TTS_MODEL, voice=voice, input=clean, response_format="wav"
             )
             audio = await response.read()
     except Exception as error:

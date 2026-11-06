@@ -14,6 +14,7 @@ export class AudioPlayback {
   private audio: HTMLAudioElement | null = null
   private url: string | null = null
   private generation = 0
+  private voicePersona: 'male' | 'female' = 'male'
 
   constructor(
     private readonly onStatus: (status: PlaybackStatus) => void,
@@ -55,6 +56,19 @@ export class AudioPlayback {
     this.muted = muted
     if (muted) this.stop()
     else this.onStatus('idle')
+  }
+
+  setVoicePersona(persona: 'male' | 'female'): void {
+    this.voicePersona = persona
+  }
+
+  speakText(text: string): void {
+    const clean = text.trim()
+    if (!clean || this.muted) return
+    const responseId = `browser-${Date.now()}`
+    this.start(responseId, true)
+    this.enqueueFallback(responseId, 0, clean)
+    this.complete(responseId, 1)
   }
 
   dispose(): void {
@@ -136,6 +150,12 @@ export class AudioPlayback {
       return
     }
     const utterance = new SpeechSynthesisUtterance(text)
+    const voices = typeof window.speechSynthesis.getVoices === 'function' ? window.speechSynthesis.getVoices() : []
+    const english = voices.filter((voice) => !voice.lang || voice.lang.toLowerCase().startsWith('en'))
+    const femalePattern = /\b(?:zira|samantha|victoria|karen|susan|hazel|aria|jenny|female|autumn)\b/i
+    const malePattern = /\b(?:david|mark|george|daniel|alex|guy|ryan|male|troy)\b/i
+    const preferred = english.find((voice) => (this.voicePersona === 'female' ? femalePattern : malePattern).test(voice.name))
+    if (preferred) utterance.voice = preferred
     this.onStatus('browser')
     utterance.onend = () => this.finishSegment(token)
     utterance.onerror = () => {

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.config import GROQ_STT_MODEL, GROQ_STT_PROMPT
 from app.services.stt import MAX_AUDIO_BYTES, transcribe
 from app.services.groq_errors import ServiceError
 
@@ -65,6 +66,20 @@ class ProtocolTests(unittest.TestCase):
                 stt.assert_awaited_once_with(audio, "audio/webm;codecs=opus")
                 ws.close()
 
+    def test_active_response_can_be_cancelled(self):
+        async def slow_reply(history, text):
+            yield {"type": "chat_delta", "text": "Starting"}
+            await asyncio.Event().wait()
+
+        with patch("app.main.stream_agent", slow_reply), TestClient(app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_json({"type": "message", "requestId": "cancel-me", "text": "Long answer", "speak": False})
+                self.assertEqual(ws.receive_json()["type"], "chat_started")
+                self.assertEqual(ws.receive_json()["type"], "chat_delta")
+                ws.send_json({"type": "stop_generation"})
+                self.assertEqual(ws.receive_json(), {"type": "chat_cancelled", "requestId": "cancel-me"})
+
     def test_unsupported_audio_and_missing_key(self):
         with TestClient(app) as client, client.websocket_connect("/ws") as ws:
             ws.receive_json()
@@ -83,11 +98,12 @@ class ProtocolTests(unittest.TestCase):
             client_factory.return_value.__aenter__.return_value.audio.transcriptions.create = create
             self.assertEqual(asyncio.run(transcribe(b"audio", "audio/ogg;codecs=opus")), "Hello")
             create.assert_awaited_once_with(
-                model="whisper-large-v3-turbo",
+                model=GROQ_STT_MODEL,
                 file=("recording.ogg", b"audio", "audio/ogg;codecs=opus"),
                 response_format="verbose_json",
                 temperature=0,
                 language="en",
+                prompt=GROQ_STT_PROMPT,
             )
             with self.assertRaises(ServiceError):
                 asyncio.run(transcribe(b"x" * (MAX_AUDIO_BYTES + 1), "audio/ogg"))
