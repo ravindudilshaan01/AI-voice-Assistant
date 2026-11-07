@@ -54,10 +54,10 @@ TOOLS = {
     ),
     "schedule_event": ToolSpec(
         name="schedule_event", label="Saving reminder",
-        description="Save a reminder or event in this assistant session. Tell the user it is not synced to an external calendar.",
+        description="Schedule a spoken reminder in this live assistant connection. Preserve the user's exact time wording. If AM or PM is ambiguous, ask before calling this tool. Tell the user the connection must remain open.",
         parameters={"type": "object", "properties": {
             "title": {"type": "string", "description": "What the event or reminder is for"},
-            "when": {"type": "string", "description": "When it should happen, as stated by the user"},
+            "when": {"type": "string", "description": "Exact future time as stated by the user, e.g. 'in 10 minutes' or 'tomorrow at 9 AM'"},
         }, "required": ["title", "when"], "additionalProperties": False},
         execute=schedule_event,
     ),

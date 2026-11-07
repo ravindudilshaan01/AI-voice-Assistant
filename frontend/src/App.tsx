@@ -55,6 +55,7 @@ export default function App() {
   const [voiceMode, setVoiceMode] = useState<VoiceMode>('cloud')
   const [voicePersona, setVoicePersona] = useState<VoicePersona>(savedVoicePersona)
   const [recording, setRecording] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([])
   const [selectedAudioInput, setSelectedAudioInput] = useState('')
   const [seconds, setSeconds] = useState(0)
@@ -64,7 +65,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [permission, setPermission] = useState<PermissionState>('prompt')
   const [showMicIntro, setShowMicIntro] = useState(() => !hasSeenMicIntro())
-  const [announcement, setAnnouncement] = useState('NOVA is ready')
+  const [announcement, setAnnouncement] = useState('Assistant is ready')
   const [debugOpen, setDebugOpen] = useState(false)
   const [debugRecording, setDebugRecording] = useState(false)
   const [debugUrl, setDebugUrl] = useState('')
@@ -89,6 +90,7 @@ export default function App() {
   const recordingRef = useRef(false)
   const startedAt = useRef(0)
   const pauseDetector = useRef<PauseDetector | null>(null)
+  const startingRecording = useRef(false)
 
   useEffect(() => { entriesRef.current = entries }, [entries])
   useEffect(() => { voiceModeRef.current = voiceMode }, [voiceMode])
@@ -108,12 +110,13 @@ export default function App() {
     stream.current = null
     if (animation.current !== null) cancelAnimationFrame(animation.current)
     animation.current = null
-    if (timer.current) clearInterval(timer.current)
+    if (timer.current) clearTimeout(timer.current)
     timer.current = null
     void audioContext.current?.close()
     audioContext.current = null
     setLevel(0)
     pauseDetector.current = null
+    startingRecording.current = false
     recordingRef.current = false
     setRecording(false)
   }
@@ -164,10 +167,12 @@ export default function App() {
     }
     const handleEvent = (event: ServerEvent) => {
       if (event.type === 'transcript') {
+        setTranscribing(false)
         setEntries((current) => [...current, { id: `user-${event.requestId}`, requestId: event.requestId, role: 'you', text: event.text }])
       } else if (event.type === 'transcript_only') {
         setDebugTranscript(event.text)
       } else if (event.type === 'chat_started') {
+        setTranscribing(false)
         responseText.current.set(event.requestId, '')
         player.start(event.requestId, event.speak !== false)
         setEntries((current) => [...current, { id: `nova-${event.requestId}`, requestId: event.requestId, role: 'nova', text: '', tools: [] }])
@@ -179,7 +184,7 @@ export default function App() {
         setToolActivity('')
         updateNova(event.requestId, (entry) => ({ ...entry, complete: true }))
         if (voiceModeRef.current === 'browser') player.speakText(responseText.current.get(event.requestId) || '')
-        setAnnouncement('NOVA finished responding')
+        setAnnouncement('Assistant finished responding')
       } else if (event.type === 'chat_cancelled') {
         setProcessing(false)
         setToolActivity('')
@@ -203,13 +208,28 @@ export default function App() {
           else tools.push(result)
           return { ...entry, tools }
         })
+      } else if (event.type === 'reminder') {
+        player.start(event.reminderId, true)
+        setEntries((current) => [...current, {
+          id: event.reminderId,
+          requestId: event.reminderId,
+          role: 'nova',
+          text: `Reminder: ${event.title}`,
+          complete: true,
+        }])
+        setAnnouncement(`Reminder: ${event.title}`)
       } else if (event.type === 'tts_fallback') {
         player.enqueueFallback(event.responseId, event.index, event.text)
+      } else if (event.type === 'tts_error') {
+        player.stop()
+        setError(event.message)
+        setAnnouncement('Natural voice unavailable')
       } else if (event.type === 'tts_complete') {
         player.complete(event.responseId, event.segmentCount)
       } else if (event.type === 'tts_stopped') {
         player.stop()
       } else if (event.type === 'error') {
+        setTranscribing(false)
         player.stop()
         setError(event.message)
         setProcessing(false)
@@ -221,6 +241,7 @@ export default function App() {
       onState: (state) => {
         setStatus(state)
         if (state === 'disconnected') {
+          setTranscribing(false)
           setProcessing(false)
           setToolActivity('')
           player.stop()
@@ -281,7 +302,7 @@ export default function App() {
   }
 
   const startRecording = async () => {
-    if (busyRef.current || recordingRef.current || status !== 'connected') return
+    if (busyRef.current || recordingRef.current || startingRecording.current || status !== 'connected') return
     playback.current?.stop()
     client.current?.stopSpeaking()
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
@@ -293,6 +314,7 @@ export default function App() {
       setError('This browser cannot record a supported format. Try Chrome, Edge, or Firefox.')
       return
     }
+    startingRecording.current = true
     try {
       let media = stream.current
       const reusableTrack = media?.getAudioTracks()[0]
@@ -338,7 +360,7 @@ export default function App() {
       }
       mediaRecorder.onerror = () => { failed = true; setError('Recording failed. Please try again.'); releaseMicrophone() }
       mediaRecorder.onstop = async () => {
-        if (timer.current) clearInterval(timer.current)
+        if (timer.current) clearTimeout(timer.current)
         timer.current = null
         recordingRef.current = false
         setRecording(false)
@@ -358,14 +380,17 @@ export default function App() {
         }
         const actualType = mediaRecorder.mimeType || chunks[0].type
         const blob = new Blob(chunks, { type: actualType })
+        setTranscribing(true)
         setProcessing(true)
         setError('')
         try {
           if (!await client.current?.sendAudio(blob, actualType, requestId, voiceModeRef.current === 'cloud', false, selectedCloudVoice())) {
+            setTranscribing(false)
             setProcessing(false)
             setError('Connection unavailable. Recording was not sent.')
           }
         } catch {
+          setTranscribing(false)
           setProcessing(false)
           setError('Could not send the recording. Please try again.')
         }
@@ -376,8 +401,14 @@ export default function App() {
       pauseDetector.current = new PauseDetector()
       startedAt.current = performance.now()
       setRecording(true)
-      const started = Date.now()
-      timer.current = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 250)
+      startingRecording.current = false
+      const updateRecordingTimer = () => {
+        if (!recordingRef.current) return
+        const elapsed = performance.now() - startedAt.current
+        setSeconds(Math.floor(elapsed / 1000))
+        timer.current = setTimeout(updateRecordingTimer, Math.max(50, 1000 - (elapsed % 1000)))
+      }
+      timer.current = setTimeout(updateRecordingTimer, 1000)
 
       const context = new AudioContext()
       audioContext.current = context
@@ -409,6 +440,7 @@ export default function App() {
       }
       updateLevel()
     } catch (cause) {
+      startingRecording.current = false
       releaseMicrophone()
       if (cause instanceof DOMException && (cause.name === 'NotAllowedError' || cause.name === 'PermissionDeniedError')) {
         setPermission('denied')
@@ -475,10 +507,11 @@ export default function App() {
     if (status !== 'connected') return status === 'connecting' ? 'Connecting' : 'Offline'
     if (permission === 'denied') return 'Permission needed'
     if (recording) return 'Listening'
+    if (transcribing) return 'Transcribing'
     if (busy) return toolActivity || 'Thinking'
     if (['preparing', 'speaking', 'browser'].includes(playbackStatus)) return 'Speaking'
     return 'Ready'
-  }, [status, permission, recording, busy, toolActivity, playbackStatus])
+  }, [status, permission, recording, transcribing, busy, toolActivity, playbackStatus])
 
   useEffect(() => { setAnnouncement(assistantState) }, [assistantState])
 
@@ -492,7 +525,10 @@ export default function App() {
   return <div className="app-shell">
     <div className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
     <header className="topbar">
-      <div className="brand"><span className="brand-mark">✦</span><span>NOVA <strong>AI</strong></span></div>
+      <div className="brand" aria-label="Voice workspace">
+        <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
+        <span className="brand-copy"><strong>Voice workspace</strong><small>Local session</small></span>
+      </div>
       <div className="topbar-actions">
         <div className={`connection-pill ${status}`}><span className="status-dot" />{status}</div>
         <button className="icon-button settings-button" type="button" onClick={() => setSettingsOpen(true)} aria-label="Open settings"><Icon name="settings" /></button>
@@ -500,39 +536,55 @@ export default function App() {
     </header>
 
     {status === 'disconnected' && <div className="reconnect-banner" role="status">
-      <span><strong>NOVA is offline.</strong> Your messages will stay here while we reconnect.</span>
+      <span><strong>The assistant is offline.</strong> Your messages will stay here while we reconnect.</span>
       <button type="button" onClick={() => client.current?.retry()}>Retry connection</button>
     </div>}
 
-    <main className="main">
-      <section className="hero" aria-label="Voice assistant">
-        <div className="orb-wrap">
-          <div className={`orb-ring ${recording ? 'active' : ''} ${busy ? 'thinking' : ''}`}>
-            <button className="orb" type="button" onClick={() => { if (recording) stopRecording(); else void startRecording() }} disabled={status !== 'connected' || busy} aria-label={recording ? 'Stop recording and send' : 'Start recording'}>
-              {recording ? <span className="orb-waveform" aria-hidden="true">{[0.65, 1, 0.8, 1.15, 0.72].map((scale, index) => <i key={index} style={{ height: `${Math.max(18, level * 62 * scale)}px` }} />)}</span> : <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"/></svg>}
-            </button>
-          </div>
+    <main className="workspace">
+      <section className={`voice-panel ${recording ? 'is-recording' : ''}`} aria-label="Voice controls">
+        <div className="voice-panel-header">
+          <span className="section-label">Voice input</span>
+          <div className={`assistant-state state-${assistantState.toLowerCase().replace(/\s+/g, '-')}`}><span />{assistantState}</div>
         </div>
-        <div className={`assistant-state state-${assistantState.toLowerCase().replace(' ', '-')}`}><span />{assistantState}</div>
-        <h1>{recording ? 'I’m listening.' : 'Meet NOVA.'}</h1>
-        <p>{recording ? `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')} · pause when done or tap to send now` : busy ? 'Building a thoughtful response for you.' : 'Tap once to talk. A long pause sends automatically.'}</p>
+
+        <div className="level-meter" aria-hidden="true">
+          {[0.42, 0.7, 0.54, 0.9, 0.62, 1, 0.75, 0.48, 0.82, 0.58, 0.94, 0.68, 0.5, 0.78, 0.44].map((scale, index) =>
+            <i key={index} style={{ transform: `scaleY(${recording ? Math.max(0.08, Math.min(1, level * scale * 1.35)) : 0.08})` }} />
+          )}
+        </div>
+
+        <button className="mic-control" type="button" onClick={() => { if (recording) stopRecording(); else void startRecording() }} disabled={status !== 'connected' || busy} aria-label={recording ? 'Stop recording and send' : 'Start recording'}>
+          {recording ? <span className="stop-glyph" aria-hidden="true" /> : <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"/></svg>}
+        </button>
+
+        <div className="voice-copy">
+          <h1>{recording ? 'Listening' : transcribing ? 'Transcribing' : busy ? 'Working on it' : assistantState === 'Speaking' ? 'Speaking' : 'Ready when you are'}</h1>
+          {recording ? <p className="recording-time"><strong>{Math.floor(seconds / 60).toString().padStart(2, '0')}:{(seconds % 60).toString().padStart(2, '0')}</strong><span>Pause to send, or press stop</span></p> : <p>{transcribing ? 'Turning your recording into text.' : busy ? 'You can stop the response at any time.' : 'Press the microphone and speak normally.'}</p>}
+        </div>
+
+        <dl className="session-details">
+          <div><dt>Voice</dt><dd>{voiceMode === 'cloud' ? voicePersona : voiceMode}</dd></div>
+          <div><dt>Mode</dt><dd>Auto-send</dd></div>
+          <div><dt>Privacy</dt><dd>Local only</dd></div>
+        </dl>
       </section>
 
-      {showMicIntro && permission !== 'granted' && <section className="permission-card" aria-label="Microphone permission information">
-        <div className="permission-icon" aria-hidden="true">🎙</div>
-        <div><strong>Talk to NOVA when you’re ready</strong><p>Your browser will ask for microphone access after your first tap. Audio is sent only when you record a message.</p></div>
-        <button type="button" onClick={() => setShowMicIntro(false)} aria-label="Dismiss microphone explanation"><Icon name="close" /></button>
-      </section>}
+      <div className="conversation-column">
+        {showMicIntro && permission !== 'granted' && <section className="permission-card" aria-label="Microphone permission information">
+          <div className="permission-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/></svg></div>
+          <div><strong>Microphone access is needed</strong><p>Your browser asks once. Audio is sent only after you start a recording.</p></div>
+          <button type="button" onClick={() => setShowMicIntro(false)} aria-label="Dismiss microphone explanation"><Icon name="close" /></button>
+        </section>}
 
-      <section className="chat-card" aria-label="Chat transcript">
+        <section className="chat-card" aria-label="Chat transcript">
         <div className="chat-header">
           <div><span className="chat-title">Conversation</span><span className="chat-subtitle">Private to this browser session</span></div>
           <button className="clear" type="button" onClick={clear} disabled={status !== 'connected' || busy || recording || (entries.length === 0 && !error)}>Clear</button>
         </div>
         <div className="transcript" ref={transcript}>
-          {entries.length === 0 ? <div className="empty"><span className="empty-icon">✧</span><strong>Start anywhere</strong><span>Ask a question, check the weather, or think out loud.</span><div className="quick-prompts">{quickPrompts.map((prompt) => <button type="button" key={prompt} onClick={() => submitText(prompt)} disabled={status !== 'connected'}>{prompt}</button>)}</div></div> : entries.map((entry) => <article className={`message ${entry.role}`} key={entry.id}>
-            <span className="message-label">{entry.role === 'you' ? 'YOU' : 'NOVA'}</span>
-            <div className="bubble">{entry.role === 'nova' ? entry.text ? <Suspense fallback={<span>{entry.text}</span>}><MarkdownMessage text={entry.text} /></Suspense> : <span className="typing-dots" aria-label="NOVA is typing"><i/><i/><i/></span> : entry.text}</div>
+          {entries.length === 0 ? <div className="empty"><strong>No conversation yet</strong><span>Speak or type to begin.</span><div className="quick-prompts">{quickPrompts.map((prompt) => <button type="button" key={prompt} onClick={() => submitText(prompt)} disabled={status !== 'connected'}>{prompt}<span aria-hidden="true">→</span></button>)}</div></div> : entries.map((entry) => <article className={`message ${entry.role}`} key={entry.id}>
+            <span className="message-label">{entry.role === 'you' ? 'YOU' : 'ASSISTANT'}</span>
+            <div className="bubble">{entry.role === 'nova' ? entry.text ? <Suspense fallback={<span>{entry.text}</span>}><MarkdownMessage text={entry.text} /></Suspense> : <span className="typing-dots" aria-label="Assistant is typing"><i/><i/><i/></span> : entry.text}</div>
             {entry.tools?.map((tool) => <ToolCard tool={tool} key={tool.id} />)}
             {entry.cancelled && <span className="cancelled-note">Response stopped</span>}
             {entry.role === 'nova' && entry.text && <div className="message-actions" aria-label="Response actions">
@@ -546,24 +598,24 @@ export default function App() {
         </div>
         {error && <div className="error" role="alert"><span>!</span>{error}<button type="button" onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}
         <form className="composer" onSubmit={send}>
-          <textarea aria-label="Message" rows={1} maxLength={4000} placeholder={status === 'connected' ? 'Message NOVA…' : 'Waiting for connection…'} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} disabled={status !== 'connected' || busy || recording} />
+          <textarea aria-label="Message" rows={1} maxLength={4000} placeholder={status === 'connected' ? 'Type a message…' : 'Waiting for connection…'} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} disabled={status !== 'connected' || busy || recording} />
           {busy ? <button className="stop-button" type="button" onClick={stopGeneration}><span className="stop-square" />Stop</button> : <button type="submit" disabled={status !== 'connected' || recording || !draft.trim()}>Send <span aria-hidden="true">↗</span></button>}
         </form>
         <div className="composer-hint">Enter to send · Shift + Enter for a new line</div>
-      </section>
-
-      <footer className="footer-note"><span>Audio is processed by Groq only when you send it</span><i />Voice: {voiceMode === 'cloud' ? `NOVA ${voicePersona}` : voiceMode === 'browser' ? 'Browser' : 'Text only'}</footer>
+        </section>
+        <footer className="footer-note">Audio is processed only after you record or send a message.</footer>
+      </div>
     </main>
 
     {settingsOpen && <div className="drawer-layer" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false) }}>
       <aside className="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <div className="drawer-header"><div><span>Preferences</span><h2 id="settings-title">Voice settings</h2></div><button className="icon-button" type="button" onClick={() => setSettingsOpen(false)} aria-label="Close settings"><Icon name="close" /></button></div>
         <div className="drawer-content">
-          <section className="setting-group"><div className="setting-heading"><strong>Response voice</strong><span>Choose how NOVA reads replies aloud.</span></div><div className="segmented-control" role="radiogroup" aria-label="Response voice">{([['cloud', 'NOVA'], ['browser', 'Browser'], ['text', 'Text only']] as const).map(([value, label]) => <button type="button" role="radio" aria-checked={voiceMode === value} className={voiceMode === value ? 'selected' : ''} onClick={() => { setVoiceMode(value); playback.current?.setMuted(value === 'text'); if (value === 'text') client.current?.stopSpeaking() }} key={value}>{label}</button>)}</div></section>
-          {voiceMode === 'cloud' && <section className="setting-group"><div className="setting-heading"><strong>NOVA voice</strong><span>Select the cloud voice used for new responses.</span></div><div className="voice-personas" role="radiogroup" aria-label="NOVA voice"><button type="button" role="radio" aria-checked={voicePersona === 'male'} className={voicePersona === 'male' ? 'selected' : ''} onClick={() => selectVoicePersona('male')}><span className="voice-avatar" aria-hidden="true">M</span><span><strong>Male</strong><small>Troy</small></span><i /></button><button type="button" role="radio" aria-checked={voicePersona === 'female'} className={voicePersona === 'female' ? 'selected' : ''} onClick={() => selectVoicePersona('female')}><span className="voice-avatar" aria-hidden="true">F</span><span><strong>Female</strong><small>Autumn</small></span><i /></button></div></section>}
-          <section className="setting-group"><label className="setting-heading" htmlFor="microphone"><strong>Microphone</strong><span>Select the input NOVA should listen to.</span></label><select id="microphone" value={selectedAudioInput} onChange={(event) => { autoSelectAudioInput.current = false; setSelectedAudioInput(event.target.value); if (!recordingRef.current) releaseMicrophone() }} disabled={recording || busy}>{audioInputs.length === 0 && <option value="">Default microphone</option>}{audioInputs.map((device, index) => <option value={device.deviceId} key={device.deviceId || index}>{device.label || `Microphone ${index + 1}`}</option>)}</select></section>
-          <section className="setting-row"><div className="setting-heading"><strong>Hands-free microphone</strong><span>Always enabled. Tap the orb to start, then tap again to stop and send.</span></div><span className="always-on-badge"><i />Always on</span></section>
-          <section className="privacy-note"><span aria-hidden="true">◇</span><div><strong>Privacy by design</strong><p>Recordings are sent to Groq for transcription. NOVA does not save audio files in this app.</p></div></section>
+          <section className="setting-group"><div className="setting-heading"><strong>Response voice</strong><span>Choose how replies are read aloud.</span></div><div className="segmented-control" role="radiogroup" aria-label="Response voice">{([['cloud', 'Natural'], ['browser', 'Browser'], ['text', 'Text only']] as const).map(([value, label]) => <button type="button" role="radio" aria-checked={voiceMode === value} className={voiceMode === value ? 'selected' : ''} onClick={() => { setVoiceMode(value); playback.current?.setMuted(value === 'text'); if (value === 'text') client.current?.stopSpeaking() }} key={value}>{label}</button>)}</div></section>
+          {voiceMode === 'cloud' && <section className="setting-group"><div className="setting-heading"><strong>Cloud voice</strong><span>Select the natural voice used for new responses.</span></div><div className="voice-personas" role="radiogroup" aria-label="Cloud voice"><button type="button" role="radio" aria-checked={voicePersona === 'male'} className={voicePersona === 'male' ? 'selected' : ''} onClick={() => selectVoicePersona('male')}><span className="voice-avatar" aria-hidden="true">M</span><span><strong>Male</strong><small>Troy</small></span><i /></button><button type="button" role="radio" aria-checked={voicePersona === 'female'} className={voicePersona === 'female' ? 'selected' : ''} onClick={() => selectVoicePersona('female')}><span className="voice-avatar" aria-hidden="true">F</span><span><strong>Female</strong><small>Autumn</small></span><i /></button></div></section>}
+          <section className="setting-group"><label className="setting-heading" htmlFor="microphone"><strong>Microphone</strong><span>Select the input the assistant should listen to.</span></label><select id="microphone" value={selectedAudioInput} onChange={(event) => { autoSelectAudioInput.current = false; setSelectedAudioInput(event.target.value); if (!recordingRef.current) releaseMicrophone() }} disabled={recording || busy}>{audioInputs.length === 0 && <option value="">Default microphone</option>}{audioInputs.map((device, index) => <option value={device.deviceId} key={device.deviceId || index}>{device.label || `Microphone ${index + 1}`}</option>)}</select></section>
+          <section className="setting-row"><div className="setting-heading"><strong>Automatic send</strong><span>A long pause ends the recording. Press the microphone again to stop immediately.</span></div><span className="always-on-badge"><i />On</span></section>
+          <section className="privacy-note"><div><strong>Audio handling</strong><p>Recordings are sent to Groq for transcription. This app does not save your audio files.</p></div></section>
           {import.meta.env.DEV && <section className="diagnostics"><button className="diagnostics-toggle" type="button" onClick={() => setDebugOpen((value) => !value)}>Audio diagnostics <span>{debugOpen ? '−' : '+'}</span></button>{debugOpen && <div className="diagnostics-body"><p>Record a five-second sample without invoking the LLM.</p><button type="button" onClick={() => void recordDebugSample()} disabled={debugRecording}>{debugRecording ? 'Recording…' : 'Record sample'}</button>{debugUrl && <audio controls src={debugUrl} />}{debugStats && <small>{debugStats}</small>}{debugTranscript && <p><strong>Transcript:</strong> {debugTranscript}</p>}<small>Input: {activeInput || 'not sampled'}{inputSampleRate ? ` · ${inputSampleRate} Hz` : ''}</small></div>}</section>}
         </div>
       </aside>

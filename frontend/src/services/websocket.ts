@@ -8,7 +8,9 @@ export type ServerEvent =
   | { type: 'chat_cancelled'; requestId: string }
   | { type: 'tool_activity'; requestId: string; name: string; label: string; state: 'started' | 'done' }
   | { type: 'tool_result'; requestId: string; name: string; label: string; ok: boolean; result?: Record<string, unknown>; error?: string }
+  | { type: 'reminder'; reminderId: string; title: string; dueAt: string }
   | { type: 'tts_fallback'; responseId: string; segmentId: string; index: number; text: string; message: string }
+  | { type: 'tts_error'; responseId: string; message: string }
   | { type: 'tts_complete'; responseId: string; segmentCount: number }
   | { type: 'tts_stopped' }
   | { type: 'transcript'; requestId: string; text: string }
@@ -150,7 +152,9 @@ function isServerEvent(value: unknown): value is ServerEvent {
     (event.type === 'tool_result' && typeof event.requestId === 'string' && typeof event.name === 'string' && typeof event.label === 'string' && typeof event.ok === 'boolean' &&
       (event.result === undefined || (typeof event.result === 'object' && event.result !== null)) &&
       (event.error === undefined || typeof event.error === 'string')) ||
+    (event.type === 'reminder' && typeof event.reminderId === 'string' && typeof event.title === 'string' && typeof event.dueAt === 'string') ||
     (event.type === 'tts_fallback' && typeof event.responseId === 'string' && typeof event.segmentId === 'string' && Number.isInteger(event.index) && typeof event.text === 'string') ||
+    (event.type === 'tts_error' && typeof event.responseId === 'string' && typeof event.message === 'string') ||
     (event.type === 'tts_complete' && typeof event.responseId === 'string' && Number.isInteger(event.segmentCount)) ||
     event.type === 'tts_stopped' ||
     (event.type === 'transcript' && typeof event.requestId === 'string' && typeof event.text === 'string') ||

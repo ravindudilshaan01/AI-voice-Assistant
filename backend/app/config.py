@@ -26,4 +26,9 @@ GROQ_STT_PROMPT = os.getenv(
 ).strip()
 GROQ_TTS_MODEL = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english").strip() or "canopylabs/orpheus-v1-english"
 GROQ_TTS_VOICE = os.getenv("GROQ_TTS_VOICE", "troy").strip().lower() or "troy"
+try:
+    GROQ_TTS_MIN_INTERVAL_SECONDS = max(0.0, float(os.getenv("GROQ_TTS_MIN_INTERVAL_SECONDS", "6.2")))
+except ValueError:
+    GROQ_TTS_MIN_INTERVAL_SECONDS = 6.2
 WEATHER_PREFERRED_COUNTRY = os.getenv("WEATHER_PREFERRED_COUNTRY", "").strip().casefold()
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Colombo").strip() or "Asia/Colombo"

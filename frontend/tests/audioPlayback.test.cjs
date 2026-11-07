@@ -68,6 +68,22 @@ test('stop interrupts playback and ignores late segments', () => {
   assert.equal(states.at(-1), 'stopped')
 })
 
+test('cloud playback failure never changes to robotic browser speech', () => {
+  const browser = fakeBrowser()
+  const states = []
+  const errors = []
+  const player = new AudioPlayback((state) => states.push(state), (message) => errors.push(message))
+  player.start('reply', true)
+  player.enqueueAudio({ responseId: 'reply', segmentId: 'reply:0', index: 0, mimeType: 'audio/wav', text: 'Natural voice.' }, new ArrayBuffer(1))
+  player.complete('reply', 1)
+  browser.players[0].onerror()
+  assert.equal(browser.spoken.length, 0)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /Natural voice playback failed/)
+  assert.equal(states.at(-1), 'idle')
+  player.dispose()
+})
+
 test('browser speech fallback preserves text and advances queue', () => {
   const browser = fakeBrowser()
   const states = []

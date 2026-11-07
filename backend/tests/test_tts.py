@@ -4,28 +4,45 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from fastapi.testclient import TestClient
+from groq import RateLimitError
 
-from app.main import app
+from app.main import app, deliver_reminder
 from app.services.groq_errors import ServiceError
 from app.services.speech_session import SpeechSession
-from app.services.tts import MAX_TTS_CHARS, TTS_VOICE, SentenceSegmenter, generate_wav
+from app.services.tts import MAX_TTS_CHARS, TTS_VOICE, SentenceSegmenter, _quota_wait_text, _rate_limit_details, generate_wav, spoken_text
 
 
 WAV = b"RIFF" + (36).to_bytes(4, "little") + b"WAVE" + b"\x00" * 32
 
 
 class SegmenterTests(unittest.TestCase):
+    def test_rate_limit_headers_distinguish_short_waits_from_daily_quota(self):
+        transient = SimpleNamespace(response=SimpleNamespace(headers={"retry-after": "8", "x-ratelimit-remaining-requests": "42"}))
+        self.assertEqual(_rate_limit_details(transient), (8.0, False))
+        daily = SimpleNamespace(response=SimpleNamespace(headers={"retry-after": "3600", "x-ratelimit-remaining-requests": "0"}))
+        self.assertEqual(_rate_limit_details(daily), (30.0, True))
+        token_daily = SimpleNamespace(response=SimpleNamespace(headers={"retry-after": "3456", "x-ratelimit-remaining-requests": "90"}), body={"error": {"message": "tokens per day (TPD) reached"}})
+        self.assertEqual(_rate_limit_details(token_daily), (30.0, True))
+        self.assertEqual(_quota_wait_text(3456), "about 58 minutes")
+
     def test_sentence_chunks_are_bounded_and_ordered(self):
         segmenter = SentenceSegmenter()
-        self.assertEqual(segmenter.feed("Hello there. How "), ["Hello there."])
-        self.assertEqual(segmenter.feed("are you?"), ["How are you?"])
-        self.assertEqual(segmenter.flush(), [])
+        self.assertEqual(segmenter.feed("Hello there. How "), [])
+        self.assertEqual(segmenter.feed("are you?"), [])
+        self.assertEqual(segmenter.flush(), ["Hello there. How are you?"])
         long_text = "This is a long sentence " * 20
         long_segmenter = SentenceSegmenter()
         chunks = long_segmenter.feed(long_text) + long_segmenter.flush()
         self.assertTrue(chunks)
         self.assertTrue(all(0 < len(chunk) <= MAX_TTS_CHARS for chunk in chunks))
+
+    def test_spoken_numbers_and_weather_units_are_normalized(self):
+        self.assertEqual(spoken_text("It is 26.5°C with 71.2% humidity."),
+                         "It is 26 point 5 degrees Celsius with 71 point 2 percent humidity.")
+        self.assertEqual(spoken_text("Wind is 12.5 km/h."),
+                         "Wind is 12 point 5 kilometers per hour.")
 
     def test_internal_json_is_not_spoken(self):
         segmenter = SentenceSegmenter()
@@ -37,8 +54,47 @@ class SegmenterTests(unittest.TestCase):
 
 
 class TTSServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rate_limit_waits_for_another_slot_and_keeps_cloud_voice(self):
+        response = httpx.Response(
+            429,
+            request=httpx.Request("POST", "https://api.groq.com/openai/v1/audio/speech"),
+            headers={"retry-after": "1", "x-ratelimit-remaining-requests": "12"},
+        )
+        rate_error = RateLimitError("rate limited", response=response, body={"error": {"message": "rate limited"}})
+        create = AsyncMock(side_effect=[rate_error, SimpleNamespace(read=AsyncMock(return_value=WAV))])
+        with patch("app.services.tts.groq_api_key", return_value="test-key"), \
+             patch("app.services.tts._wait_for_tts_slot", new=AsyncMock()), \
+             patch("app.services.tts.asyncio.sleep", new=AsyncMock()) as wait, \
+             patch("app.services.tts.AsyncGroq") as client_factory:
+            client_factory.return_value.__aenter__.return_value.audio.speech.create = create
+            result = await generate_wav("Keep the natural voice.", "autumn")
+        self.assertEqual(result, WAV)
+        self.assertEqual(create.await_count, 2)
+        wait.assert_awaited_once()
+
+    async def test_reminder_event_and_audio_are_delivered_as_one_priority_response(self):
+        class FakeSpeech:
+            def __init__(self):
+                self.events = []
+                self.audio = []
+
+            async def send_json(self, event):
+                self.events.append(event)
+
+            async def send_audio(self, response_id, index, text, audio):
+                self.audio.append((response_id, index, text, audio))
+
+        speech = FakeSpeech()
+        reminder = {"title": "Check the oven", "due_at": "2020-11-07T20:00:00+05:30"}
+        with patch("app.main.generate_wav", new=AsyncMock(return_value=WAV)):
+            await deliver_reminder(speech, reminder, "autumn")
+        self.assertEqual(speech.events[0]["type"], "reminder")
+        self.assertEqual(speech.events[-1], {"type": "tts_complete", "responseId": speech.events[0]["reminderId"], "segmentCount": 1})
+        self.assertEqual(speech.audio[0][1:], (0, "Reminder. Check the oven.", WAV))
+
     async def test_sdk_generates_wav_with_required_model_and_voice(self):
         with patch("app.services.tts.groq_api_key", return_value="test-key"), \
+             patch("app.services.tts._wait_for_tts_slot", new=AsyncMock()), \
              patch("app.services.tts.AsyncGroq") as client_factory:
             response = AsyncMock(return_value=SimpleNamespace(read=AsyncMock(return_value=WAV)))
             client_factory.return_value.__aenter__.return_value.audio.speech.create = response
@@ -64,7 +120,7 @@ class TTSServiceTests(unittest.IsolatedAsyncioTestCase):
                 await generate_wav("Hello", "unsupported")
             client_factory.assert_not_called()
 
-    async def test_audio_metadata_binary_order_and_fallback(self):
+    async def test_audio_metadata_binary_order_and_consistent_cloud_failure(self):
         class FakeWebSocket:
             def __init__(self):
                 self.frames = []
@@ -98,7 +154,8 @@ class TTSServiceTests(unittest.IsolatedAsyncioTestCase):
             session.enqueue("Second sentence.")
             session.finish()
             await asyncio.wait_for(session.task, timeout=1)
-        self.assertEqual([event["type"] for _, event in websocket.frames], ["tts_fallback", "tts_fallback", "tts_complete"])
+        self.assertEqual([event["type"] for _, event in websocket.frames], ["tts_error", "tts_complete"])
+        self.assertEqual(websocket.frames[-1][1]["segmentCount"], 0)
         self.assertEqual(synthesize.await_count, 1)
 
 
@@ -125,9 +182,10 @@ class SpeechProtocolTests(unittest.TestCase):
                     else:
                         frames.append(raw["bytes"])
                 audio_positions = [i for i, frame in enumerate(frames) if isinstance(frame, dict) and frame["type"] == "tts_audio"]
-                self.assertEqual(len(audio_positions), 2)
-                self.assertEqual([frames[i]["segmentId"] for i in audio_positions], ["spoken:0", "spoken:1"])
+                self.assertEqual(len(audio_positions), 1)
+                self.assertEqual([frames[i]["segmentId"] for i in audio_positions], ["spoken:0"])
                 self.assertTrue(all(frames[i + 1] == WAV for i in audio_positions))
                 self.assertIn("chat_done", [frame["type"] for frame in frames if isinstance(frame, dict)])
-                self.assertEqual([call.args[1] for call in synthesize.await_args_list], ["autumn", "autumn"])
+                self.assertEqual([call.args[0] for call in synthesize.await_args_list], ["Hello. How are you?"])
+                self.assertEqual([call.args[1] for call in synthesize.await_args_list], ["autumn"])
                 ws.close()

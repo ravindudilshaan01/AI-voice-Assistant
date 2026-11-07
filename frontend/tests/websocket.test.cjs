@@ -34,6 +34,11 @@ test('sends cancellation and accepts structured tool results', () => {
   socket.onmessage({ data: JSON.stringify({ type: 'tool_result', requestId: 'r1', name: 'web_search', label: 'Searching', ok: true, result: { source: 'https://example.com' } }) })
   assert.equal(events[0].type, 'tool_result')
   assert.equal(events[0].result.source, 'https://example.com')
+  socket.onmessage({ data: JSON.stringify({ type: 'reminder', reminderId: 'reminder-1', title: 'Check the oven', dueAt: '2026-11-07T20:00:00+05:30' }) })
+  assert.equal(events[1].type, 'reminder')
+  assert.equal(events[1].title, 'Check the oven')
+  socket.onmessage({ data: JSON.stringify({ type: 'tts_error', responseId: 'r1', message: 'Natural voice unavailable.' }) })
+  assert.equal(events[2].type, 'tts_error')
   client.disconnect()
 })
 

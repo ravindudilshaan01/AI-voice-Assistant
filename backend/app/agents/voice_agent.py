@@ -13,6 +13,21 @@ from app.tools.registry import TOOL_SCHEMAS, TOOLS, execute_tool
 MAX_TOOL_ROUNDS = 3
 MAX_CALLS_PER_ROUND = 4
 DETAIL_REQUEST = re.compile(r"\b(?:explain|elaborate|detail|detailed|in-depth|step[- ]by[- ]step|why|how does|how do|compare|break down)\b", re.I)
+REMINDER_REQUEST = re.compile(r"\b(?:remind|reminder|set\s+(?:an?\s+)?alarm)\b", re.I)
+WEATHER_REQUEST = re.compile(r"\b(?:weather|temperature|forecast|rain(?:ing)?|humidity)\b", re.I)
+OTHER_TOOL_REQUEST = re.compile(r"\b(?:calculate|compute|search|look\s+up|find\s+online)\b|\d\s*[+*/]\s*\d", re.I)
+
+
+def tool_choice_for(user_text: str, round_number: int) -> str | dict:
+    if round_number != 0:
+        return "auto"
+    if OTHER_TOOL_REQUEST.search(user_text) or (REMINDER_REQUEST.search(user_text) and WEATHER_REQUEST.search(user_text)):
+        return "auto"
+    if REMINDER_REQUEST.search(user_text):
+        return {"type": "function", "function": {"name": "schedule_event"}}
+    if WEATHER_REQUEST.search(user_text):
+        return {"type": "function", "function": {"name": "get_weather"}}
+    return "auto"
 
 
 async def stream_agent(history: list[dict[str, str]], user_text: str) -> AsyncIterator[dict[str, Any]]:
@@ -30,9 +45,9 @@ async def stream_agent(history: list[dict[str, str]], user_text: str) -> AsyncIt
                     model=LLM_MODEL,
                     messages=messages,
                     tools=TOOL_SCHEMAS,
-                    tool_choice="auto" if round_number < MAX_TOOL_ROUNDS else "none",
+                    tool_choice=tool_choice_for(user_text, round_number) if round_number < MAX_TOOL_ROUNDS else "none",
                     stream=True,
-                    max_tokens=600 if DETAIL_REQUEST.search(user_text) else 160,
+                    max_tokens=600 if DETAIL_REQUEST.search(user_text) else 100,
                 )
                 content_parts: list[str] = []
                 pending_calls: dict[int, dict[str, str]] = {}
@@ -54,13 +69,13 @@ async def stream_agent(history: list[dict[str, str]], user_text: str) -> AsyncIt
                 if not pending_calls:
                     return
                 if round_number == MAX_TOOL_ROUNDS:
-                    raise ServiceError("NOVA could not complete the tool request. Please try a simpler question.")
+                    raise ServiceError("The assistant could not complete the tool request. Please try a simpler question.")
                 if len(pending_calls) > MAX_CALLS_PER_ROUND:
-                    raise ServiceError("NOVA requested too many tools at once. Please try a simpler question.")
+                    raise ServiceError("The assistant requested too many tools at once. Please try a simpler question.")
 
                 calls = [pending_calls[index] for index in sorted(pending_calls)]
                 if any(not call["id"] or not call["name"] for call in calls):
-                    raise ServiceError("NOVA received an incomplete tool request. Please try again.")
+                    raise ServiceError("The assistant received an incomplete tool request. Please try again.")
                 messages.append({
                     "role": "assistant",
                     "content": "".join(content_parts) or None,

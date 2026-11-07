@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app.agents.voice_agent import MAX_TOOL_ROUNDS, stream_agent
+from app.agents.voice_agent import MAX_TOOL_ROUNDS, stream_agent, tool_choice_for
 from app.tools.calculator import calculate
 from app.tools.errors import ToolError
 from app.tools.registry import execute_tool
-from app.tools.scheduler import schedule_event
+from app.tools.scheduler import parse_reminder_time, schedule_event
 from app.tools.search import web_search
 from app.tools.weather import get_weather
 
@@ -60,6 +60,12 @@ class CalculatorTests(unittest.TestCase):
 
 
 class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_weather_and_reminder_requests_force_the_correct_live_tool(self):
+        self.assertEqual(tool_choice_for("Weather in Gampaha", 0)["function"]["name"], "get_weather")
+        self.assertEqual(tool_choice_for("Remind me in ten minutes", 0)["function"]["name"], "schedule_event")
+        self.assertEqual(tool_choice_for("Hello", 0), "auto")
+        self.assertEqual(tool_choice_for("Weather in Gampaha", 1), "auto")
+
     async def test_multiple_native_tool_calls_then_final_stream(self):
         first = chunks(
             chunk(calls=[call(0, "call_calc", "calculate", '{"expression":"2')]),
@@ -98,7 +104,7 @@ class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
             events = [event async for event in stream_agent([], "Hello")]
         self.assertEqual(events, [{"type": "chat_delta", "text": "Hello"}])
         self.assertEqual(fake.chat.completions.create.await_count, 1)
-        self.assertEqual(fake.chat.completions.create.await_args.kwargs["max_tokens"], 160)
+        self.assertEqual(fake.chat.completions.create.await_args.kwargs["max_tokens"], 100)
 
     async def test_explicit_explanation_gets_larger_response_budget(self):
         fake = FakeGroq([chunks(chunk(content="A detailed answer"))])
@@ -174,6 +180,17 @@ class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["source"], "https://example.test")
 
     async def test_scheduler_is_explicitly_session_memory(self):
-        result = schedule_event("Demo", "tomorrow at 9")
+        result = schedule_event("Demo", "tomorrow at 9 AM")
         self.assertTrue(result["saved"])
-        self.assertEqual(result["storage"], "session memory")
+        self.assertEqual(result["storage"], "this connection")
+        self.assertIn("due_at", result)
+
+    async def test_reminder_time_is_exact_and_ambiguous_times_are_rejected(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        now = datetime(2026, 11, 7, 14, 30, 15, tzinfo=ZoneInfo("Asia/Colombo"))
+        self.assertEqual(parse_reminder_time("in 10 minutes", now).isoformat(), "2026-11-07T14:40:15+05:30")
+        self.assertEqual(parse_reminder_time("tomorrow at 9 AM", now).isoformat(), "2026-11-08T09:00:00+05:30")
+        with self.assertRaisesRegex(ToolError, "AM or PM"):
+            parse_reminder_time("tomorrow at 9", now)

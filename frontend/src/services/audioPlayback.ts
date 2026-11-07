@@ -127,20 +127,18 @@ export class AudioPlayback {
     const audio = new Audio(this.url)
     this.audio = audio
     let handled = false
-    const useFallback = () => {
+    const failNaturalPlayback = () => {
       if (handled || token !== this.generation) return
       handled = true
       audio.pause()
       audio.onended = null
       audio.onerror = null
-      this.audio = null
-      if (this.url) URL.revokeObjectURL(this.url)
-      this.url = null
-      this.speakInBrowser(segment.text, token)
+      this.onError('Natural voice playback failed. The reply is still available as text.')
+      this.finishSegment(token)
     }
     audio.onended = () => { if (!handled) { handled = true; this.finishSegment(token) } }
-    audio.onerror = useFallback
-    void audio.play().catch(useFallback)
+    audio.onerror = failNaturalPlayback
+    void audio.play().catch(failNaturalPlayback)
   }
 
   private speakInBrowser(text: string, token: number): void {

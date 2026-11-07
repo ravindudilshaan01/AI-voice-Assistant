@@ -28,6 +28,8 @@ export function ToolCard({ tool }: Props) {
         <span className="tool-kicker">Current weather</span>
         <strong>{text(result.location) || 'Weather result'}</strong>
         <span>{text(result.condition)} · Feels like {text(result.feels_like)}{text(result.temperature_unit)}</span>
+        <span>Humidity {text(result.relative_humidity)}{text(result.humidity_unit)} · Wind {text(result.wind_speed)} {text(result.wind_speed_unit)}</span>
+        <small>Observed {text(result.observed_at)} · {text(result.source)}</small>
       </div>
       <div className="weather-temperature">{text(result.temperature)}{text(result.temperature_unit)}</div>
     </aside>
@@ -49,9 +51,10 @@ export function ToolCard({ tool }: Props) {
     return <aside className="tool-card" aria-label="Saved reminder">
       <div className="tool-card-icon" aria-hidden="true">✓</div>
       <div className="tool-card-main">
-        <span className="tool-kicker">Saved in this session</span>
+        <span className="tool-kicker">Spoken reminder scheduled</span>
         <strong>{text(result.title)}</strong>
-        <span>{text(result.when)}</span>
+        <span>{text(result.display_time) || text(result.when)}</span>
+        <small>Keep this page connected so the reminder can speak.</small>
       </div>
     </aside>
   }

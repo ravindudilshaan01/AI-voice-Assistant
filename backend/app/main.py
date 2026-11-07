@@ -1,6 +1,8 @@
 import asyncio
 import json
 from contextlib import suppress
+from datetime import datetime
+from typing import Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,9 +13,9 @@ from app.services.groq_errors import ServiceError
 from app.services.llm import MAX_TEXT_CHARS, MAX_TURNS
 from app.services.speech_session import SpeechSession
 from app.services.stt import MAX_AUDIO_BYTES, SUPPORTED_MIME_TYPES, transcribe
-from app.services.tts import SUPPORTED_TTS_VOICES, TTS_VOICE, SentenceSegmenter
+from app.services.tts import SUPPORTED_TTS_VOICES, TTS_VOICE, SentenceSegmenter, generate_wav
 
-app = FastAPI(title="NOVA AI API")
+app = FastAPI(title="Friday Voice Assistant API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_ORIGIN],
@@ -28,7 +30,48 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-async def answer(speech: SpeechSession, history: list[dict[str, str]], text: str, request_id: str, speak: bool, voice: str = TTS_VOICE) -> None:
+async def deliver_reminder(speech: SpeechSession, reminder: dict, voice: str) -> None:
+    due = datetime.fromisoformat(str(reminder["due_at"]))
+    title = str(reminder["title"])
+    spoken = f"Reminder. {title}."
+    response_id = f"reminder-{int(due.timestamp() * 1000)}"
+    # Prepare speech early so network generation does not make the reminder late.
+    audio_task = asyncio.create_task(generate_wav(spoken, voice))
+    try:
+        # Recheck the wall clock after sleeping so event-loop jitter can never
+        # deliver the reminder a few milliseconds before its due timestamp.
+        while (delay := (due - datetime.now(due.tzinfo)).total_seconds()) > 0:
+            await asyncio.sleep(delay)
+        await speech.send_json({
+            "type": "reminder", "reminderId": response_id,
+            "title": title, "dueAt": due.isoformat(),
+        })
+        try:
+            audio = await audio_task
+            await speech.send_audio(response_id, 0, spoken, audio)
+        except ServiceError as error:
+            await speech.send_json({
+                "type": "tts_error", "responseId": response_id,
+                "message": str(error),
+            })
+            await speech.send_json({"type": "tts_complete", "responseId": response_id, "segmentCount": 0})
+            return
+        await speech.send_json({"type": "tts_complete", "responseId": response_id, "segmentCount": 1})
+    except asyncio.CancelledError:
+        audio_task.cancel()
+        await asyncio.gather(audio_task, return_exceptions=True)
+        raise
+
+
+async def answer(
+    speech: SpeechSession,
+    history: list[dict[str, str]],
+    text: str,
+    request_id: str,
+    speak: bool,
+    voice: str = TTS_VOICE,
+    schedule_reminder: Callable[[dict, str], None] | None = None,
+) -> None:
     await speech.start(request_id, speak, voice)
     await speech.send_json({"type": "chat_started", "requestId": request_id, "speak": speak})
     parts: list[str] = []
@@ -40,10 +83,13 @@ async def answer(speech: SpeechSession, history: list[dict[str, str]], text: str
                 if speak:
                     for segment in segmenter.feed(event["text"]):
                         speech.enqueue(segment)
+            elif event["type"] == "tool_result" and event.get("name") == "schedule_event" and event.get("ok"):
+                if schedule_reminder and isinstance(event.get("result"), dict):
+                    schedule_reminder(event["result"], voice)
             await speech.send_json({**event, "requestId": request_id})
         response = "".join(parts).strip()
         if not response:
-            raise ServiceError("NOVA returned an empty answer. Please try again.")
+            raise ServiceError("The assistant returned an empty answer. Please try again.")
         if speak:
             for segment in segmenter.flush():
                 speech.enqueue(segment)
@@ -72,6 +118,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     history: list[dict[str, str]] = []
     active_answer: asyncio.Task[None] | None = None
     active_request_id = ""
+    reminder_tasks: set[asyncio.Task[None]] = set()
+
+    def schedule_reminder(reminder: dict, voice: str) -> None:
+        task = asyncio.create_task(deliver_reminder(speech, reminder, voice))
+        reminder_tasks.add(task)
+        task.add_done_callback(reminder_tasks.discard)
 
     async def cancel_answer(notify: bool = True) -> None:
         nonlocal active_answer, active_request_id
@@ -96,13 +148,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     async def start_answer(text: str, request_id: str, speak: bool, voice: str = TTS_VOICE) -> None:
         nonlocal active_answer, active_request_id
         if active_answer is not None and not active_answer.done():
-            await speech.send_json({"type": "error", "requestId": request_id, "message": "NOVA is already answering. Stop the current response first."})
+            await speech.send_json({"type": "error", "requestId": request_id, "message": "The assistant is already answering. Stop the current response first."})
             return
         if active_answer is not None:
             with suppress(Exception):
                 await active_answer
         active_request_id = request_id
-        active_answer = asyncio.create_task(answer(speech, history, text, request_id, speak, voice))
+        active_answer = asyncio.create_task(answer(speech, history, text, request_id, speak, voice, schedule_reminder))
 
     def selected_voice(message: dict) -> str:
         voice = message.get("voice")
@@ -182,4 +234,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         pass
     finally:
         await cancel_answer(notify=False)
+        for task in reminder_tasks:
+            task.cancel()
+        if reminder_tasks:
+            await asyncio.gather(*reminder_tasks, return_exceptions=True)
         await speech.stop()

@@ -1,6 +1,6 @@
-# NOVA AI Voice Assistant
+# Friday Voice Assistant
 
-NOVA is a React, TypeScript, FastAPI, and WebSocket voice assistant powered by Groq. It uses `whisper-large-v3-turbo` for transcription, a configurable Groq Llama model for streamed chat and tool calls, and `canopylabs/orpheus-v1-english` for spoken WAV responses.
+Friday is a React, TypeScript, FastAPI, and WebSocket voice assistant powered by Groq. It uses Whisper for transcription, a configurable Groq model for streamed chat and tool calls, and `canopylabs/orpheus-v1-english` for spoken WAV responses.
 
 ## Features
 
@@ -30,6 +30,8 @@ GROQ_STT_MODEL=whisper-large-v3-turbo
 GROQ_STT_LANGUAGE=en
 GROQ_TTS_MODEL=canopylabs/orpheus-v1-english
 GROQ_TTS_VOICE=troy
+GROQ_TTS_MIN_INTERVAL_SECONDS=6.2
+APP_TIMEZONE=Asia/Colombo
 ```
 
 Use `GROQ_STT_MODEL=whisper-large-v3` when prioritizing accuracy over speed, and `GROQ_STT_LANGUAGE=auto` to let Whisper detect the language.

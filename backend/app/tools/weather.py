@@ -8,7 +8,8 @@ from app.tools.errors import ToolError
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
-CURRENT_FIELDS = "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m"
+CURRENT_FIELDS = "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,cloud_cover,surface_pressure,wind_speed_10m,wind_direction_10m,is_day"
+COUNTRY_CODES = {"sri lanka": "LK"}
 
 
 def weather_description(code: int | None) -> str:
@@ -39,24 +40,41 @@ async def get_weather(location: str, unit: str = "celsius") -> dict:
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=3.0)) as client:
-            geocode = await client.get(GEOCODING_URL, params={"name": location.strip(), "count": 5, "language": "en", "format": "json"})
+            requested_parts = [part.strip() for part in location.split(",") if part.strip()]
+            requested_name = requested_parts[0].casefold()
+            requested_country = requested_parts[-1].casefold() if len(requested_parts) > 1 else WEATHER_PREFERRED_COUNTRY
+            geocode_params = {"name": requested_parts[0], "count": 10, "language": "en", "format": "json"}
+            country_code = COUNTRY_CODES.get(requested_country)
+            if country_code:
+                geocode_params["countryCode"] = country_code
+            geocode = await client.get(GEOCODING_URL, params=geocode_params)
             geocode.raise_for_status()
             places = geocode.json().get("results") or []
             if not places:
                 raise ToolError(f"No location found for {location.strip()}.")
-            exact = [candidate for candidate in places if isinstance(candidate, dict) and str(candidate.get("name", "")).casefold() == location.split(",", 1)[0].strip().casefold()]
-            preferred = [candidate for candidate in places if isinstance(candidate, dict) and str(candidate.get("country", "")).casefold() == WEATHER_PREFERRED_COUNTRY]
-            if preferred:
-                place = preferred[0]
-            elif len({candidate.get("country_code") for candidate in exact}) > 1 and "," not in location:
+            candidates = [candidate for candidate in places if isinstance(candidate, dict)]
+            country_matches = [candidate for candidate in candidates if str(candidate.get("country", "")).casefold() == requested_country]
+            if requested_country and not country_matches:
+                raise ToolError(f"No clear match for {requested_parts[0]} in {requested_parts[-1] if len(requested_parts) > 1 else requested_country.title()}. Please specify the city and country.")
+            exact = [candidate for candidate in candidates if str(candidate.get("name", "")).casefold() == requested_name]
+            preferred_exact = [candidate for candidate in exact if str(candidate.get("country", "")).casefold() == requested_country]
+            if preferred_exact:
+                place = max(preferred_exact, key=lambda item: int(item.get("population") or 0))
+            elif len({candidate.get("country_code") for candidate in exact}) > 1 and "," not in location and not WEATHER_PREFERRED_COUNTRY:
                 raise ToolError(f"Multiple places match {location.strip()}. Please specify the city and country.")
+            elif exact:
+                place = max(exact, key=lambda item: int(item.get("population") or 0))
             else:
-                place = places[0]
+                ranked = sorted(candidates, key=lambda item: (
+                    str(item.get("country", "")).casefold() == requested_country,
+                    SequenceMatcher(None, requested_name, str(item.get("name", "")).casefold()).ratio(),
+                    int(item.get("population") or 0),
+                ), reverse=True)
+                place = ranked[0]
             if not isinstance(place, dict):
                 raise ToolError("Weather service returned incomplete location data.")
-            requested_name = location.split(",", 1)[0].strip().casefold()
             matched_name = str(place.get("name", "")).casefold()
-            if "," not in location and SequenceMatcher(None, requested_name, matched_name).ratio() < 0.72:
+            if SequenceMatcher(None, requested_name, matched_name).ratio() < 0.82:
                 raise ToolError(f"The location {location.strip()} was not clear. Please provide the city and country.")
             forecast = await client.get(FORECAST_URL, params={
                 "latitude": place["latitude"],
@@ -67,6 +85,7 @@ async def get_weather(location: str, unit: str = "celsius") -> dict:
                 "precipitation_unit": "mm" if unit == "celsius" else "inch",
                 "timezone": place.get("timezone") or "auto",
                 "forecast_days": 1,
+                "cell_selection": "land",
             })
             forecast.raise_for_status()
             data = forecast.json()
@@ -98,6 +117,14 @@ async def get_weather(location: str, unit: str = "celsius") -> dict:
         "precipitation_unit": units.get("precipitation"),
         "wind_speed": current.get("wind_speed_10m"),
         "wind_speed_unit": units.get("wind_speed_10m"),
+        "wind_direction": current.get("wind_direction_10m"),
+        "wind_direction_unit": units.get("wind_direction_10m"),
+        "cloud_cover": current.get("cloud_cover"),
+        "cloud_cover_unit": units.get("cloud_cover"),
+        "surface_pressure": current.get("surface_pressure"),
+        "surface_pressure_unit": units.get("surface_pressure"),
+        "is_day": current.get("is_day"),
         "weather_code": current.get("weather_code"),
         "condition": weather_description(current.get("weather_code")),
+        "source": "Open-Meteo",
     }
