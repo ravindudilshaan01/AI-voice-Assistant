@@ -194,6 +194,8 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
 .tool-card-main strong { overflow: hidden; color: var(--ink); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .tool-card-main span, .tool-card-main a, .tool-card-main small { color: var(--muted); font-size: 10px; }
 .tool-card-main a { width: fit-content; color: var(--accent-dark); }
+.search-sources { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.search-sources a { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
 .tool-kicker { font: 500 8px 'IBM Plex Mono', monospace; text-transform: uppercase; letter-spacing: .09em; }
 .weather-temperature { padding-right: 14px; color: var(--ink); font: 500 22px 'IBM Plex Mono', monospace; }
 

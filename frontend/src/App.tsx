@@ -6,6 +6,7 @@ import { NovaWebSocket, type ConnectionState, type ServerEvent } from './service
 
 type VoiceMode = 'cloud' | 'browser' | 'text'
 type VoicePersona = 'male' | 'female'
+type VoiceProvider = 'kokoro' | 'groq'
 type PermissionState = 'prompt' | 'granted' | 'denied'
 type Entry = {
   id: string
@@ -17,7 +18,9 @@ type Entry = {
   tools?: ToolView[]
 }
 
-const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws'
+const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+const wsUrl = import.meta.env.VITE_WS_URL || `${wsProtocol}//${window.location.host}/ws`
+const apiUrl = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 const maxAudioBytes = 10 * 1024 * 1024
 const maxRecordingMs = 60_000
 const audioTypes = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg']
@@ -30,6 +33,10 @@ const hasSeenMicIntro = () => {
 
 const savedVoicePersona = (): VoicePersona => {
   try { return localStorage.getItem('nova-voice-persona') === 'female' ? 'female' : 'male' } catch { return 'male' }
+}
+
+const savedVoiceProvider = (): VoiceProvider => {
+  try { return localStorage.getItem('nova-voice-provider') === 'groq' ? 'groq' : 'kokoro' } catch { return 'kokoro' }
 }
 
 const Icon = ({ name }: { name: 'settings' | 'copy' | 'retry' | 'speak' | 'delete' | 'close' }) => {
@@ -54,6 +61,7 @@ export default function App() {
   const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus>('idle')
   const [voiceMode, setVoiceMode] = useState<VoiceMode>('cloud')
   const [voicePersona, setVoicePersona] = useState<VoicePersona>(savedVoicePersona)
+  const [voiceProvider, setVoiceProvider] = useState<VoiceProvider>(savedVoiceProvider)
   const [recording, setRecording] = useState(false)
   const [transcribing, setTranscribing] = useState(false)
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([])
@@ -71,12 +79,14 @@ export default function App() {
   const [debugUrl, setDebugUrl] = useState('')
   const [debugTranscript, setDebugTranscript] = useState('')
   const [debugStats, setDebugStats] = useState('')
+  const [performanceStats, setPerformanceStats] = useState('')
 
   const autoSelectAudioInput = useRef(true)
   const client = useRef<NovaWebSocket | null>(null)
   const playback = useRef<AudioPlayback | null>(null)
   const voiceModeRef = useRef<VoiceMode>('cloud')
   const voicePersonaRef = useRef<VoicePersona>(voicePersona)
+  const voiceProviderRef = useRef<VoiceProvider>(voiceProvider)
   const recorder = useRef<MediaRecorder | null>(null)
   const stream = useRef<MediaStream | null>(null)
   const audioContext = useRef<AudioContext | null>(null)
@@ -91,17 +101,26 @@ export default function App() {
   const startedAt = useRef(0)
   const pauseDetector = useRef<PauseDetector | null>(null)
   const startingRecording = useRef(false)
+  const speechEndedAt = useRef(new Map<string, number>())
 
   useEffect(() => { entriesRef.current = entries }, [entries])
   useEffect(() => { voiceModeRef.current = voiceMode }, [voiceMode])
   useEffect(() => { voicePersonaRef.current = voicePersona }, [voicePersona])
+  useEffect(() => { voiceProviderRef.current = voiceProvider }, [voiceProvider])
 
-  const selectedCloudVoice = () => voicePersonaRef.current === 'female' ? 'autumn' : 'troy'
+  const selectedCloudVoice = () => voicePersonaRef.current
   const selectVoicePersona = (value: VoicePersona) => {
     voicePersonaRef.current = value
     setVoicePersona(value)
     playback.current?.setVoicePersona(value)
     try { localStorage.setItem('nova-voice-persona', value) } catch { /* Optional preference storage. */ }
+  }
+  const selectVoiceProvider = (value: VoiceProvider) => {
+    voiceProviderRef.current = value
+    setVoiceProvider(value)
+    playback.current?.stop()
+    client.current?.stopSpeaking()
+    try { localStorage.setItem('nova-voice-provider', value) } catch { /* Optional preference storage. */ }
   }
 
   const setProcessing = (value: boolean) => { busyRef.current = value; setBusy(value) }
@@ -158,7 +177,13 @@ export default function App() {
     const updatePlaybackStatus = (next: PlaybackStatus) => {
       setPlaybackStatus(next)
     }
-    const player = new AudioPlayback(updatePlaybackStatus, setError)
+    const player = new AudioPlayback(updatePlaybackStatus, setError, (responseId) => {
+      const endedAt = speechEndedAt.current.get(responseId)
+      if (endedAt !== undefined) {
+        client.current?.sendMetric('speech_end_to_first_playback', performance.now() - endedAt)
+        speechEndedAt.current.delete(responseId)
+      }
+    })
     player.setVoicePersona(voicePersonaRef.current)
     playback.current = player
 
@@ -228,6 +253,8 @@ export default function App() {
         player.complete(event.responseId, event.segmentCount)
       } else if (event.type === 'tts_stopped') {
         player.stop()
+      } else if (event.type === 'tts_provider_changed') {
+        setAnnouncement(`${event.from === 'groq' ? 'Groq' : 'Local'} voice unavailable. Switched to ${event.to === 'groq' ? 'Groq' : 'local'} voice.`)
       } else if (event.type === 'error') {
         setTranscribing(false)
         player.stop()
@@ -285,7 +312,7 @@ export default function App() {
     client.current?.stopSpeaking()
     const requestId = crypto.randomUUID()
     const speak = voiceModeRef.current === 'cloud'
-    if (!client.current?.sendMessage(text, requestId, speak, selectedCloudVoice())) {
+    if (!client.current?.sendMessage(text, requestId, speak, selectedCloudVoice(), voiceProviderRef.current)) {
       setError('Connection unavailable. Your message was not sent.')
       return
     }
@@ -302,7 +329,12 @@ export default function App() {
   }
 
   const startRecording = async () => {
-    if (busyRef.current || recordingRef.current || startingRecording.current || status !== 'connected') return
+    if (recordingRef.current || startingRecording.current || status !== 'connected') return
+    if (busyRef.current) {
+      playback.current?.stop()
+      client.current?.stopGeneration()
+      setProcessing(false)
+    }
     playback.current?.stop()
     client.current?.stopSpeaking()
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
@@ -369,6 +401,7 @@ export default function App() {
         void audioContext.current?.close()
         audioContext.current = null
         recorder.current = null
+        client.current?.endPcmStream(requestId)
         if (failed) return
         if (totalBytes === 0) { setError('The recording was empty. Please try again.'); return }
         if (totalBytes > maxAudioBytes) { setError('Recording is too large. Please record a shorter message.'); return }
@@ -383,15 +416,18 @@ export default function App() {
         setTranscribing(true)
         setProcessing(true)
         setError('')
+        speechEndedAt.current.set(requestId, performance.now())
         try {
-          if (!await client.current?.sendAudio(blob, actualType, requestId, voiceModeRef.current === 'cloud', false, selectedCloudVoice())) {
+          if (!await client.current?.sendAudio(blob, actualType, requestId, voiceModeRef.current === 'cloud', false, selectedCloudVoice(), voiceProviderRef.current)) {
             setTranscribing(false)
             setProcessing(false)
+            speechEndedAt.current.delete(requestId)
             setError('Connection unavailable. Recording was not sent.')
           }
         } catch {
           setTranscribing(false)
           setProcessing(false)
+          speechEndedAt.current.delete(requestId)
           setError('Could not send the recording. Please try again.')
         }
       }
@@ -414,31 +450,54 @@ export default function App() {
       audioContext.current = context
       await context.resume()
       const source = context.createMediaStreamSource(media)
-      const analyser = context.createAnalyser()
-      analyser.fftSize = 512
-      analyser.smoothingTimeConstant = 0.72
-      source.connect(analyser)
-      const data = new Uint8Array(analyser.fftSize)
-      const updateLevel = () => {
-        if (!recordingRef.current) return
-        const now = performance.now()
-        analyser.getByteTimeDomainData(data)
-        let sumSquares = 0
-        for (const sample of data) {
-          const centered = (sample - 128) / 128
-          sumSquares += centered * centered
+      if (context.audioWorklet) {
+        await context.audioWorklet.addModule('/pcm-capture.worklet.js')
+        const capture = new AudioWorkletNode(context, 'pcm-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] })
+        const silent = context.createGain()
+        silent.gain.value = 0
+        source.connect(capture).connect(silent).connect(context.destination)
+        let frameSequence = 0
+        client.current?.startPcmStream(requestId)
+        capture.port.onmessage = (event: MessageEvent<{ pcm: Int16Array; rms: number }>) => {
+          if (!recordingRef.current) return
+          const now = performance.now()
+          const rawRms = event.data.rms
+          client.current?.sendPcmFrame(frameSequence++, now, 16_000, event.data.pcm)
+          const nextLevel = Math.min(1, rawRms * 8)
+          rmsTotal += rawRms
+          rmsSamples += 1
+          peakLevel = Math.max(peakLevel, rawRms)
+          setLevel(nextLevel)
+          if (pauseDetector.current?.update(rawRms, now).shouldStop && recorder.current?.state === 'recording') recorder.current.stop()
+          if (now - startedAt.current >= maxRecordingMs) recorder.current?.stop()
         }
-        const rawRms = Math.sqrt(sumSquares / data.length)
-        const nextLevel = Math.min(1, rawRms * 8)
-        rmsTotal += rawRms
-        rmsSamples += 1
-        peakLevel = Math.max(peakLevel, rawRms)
-        setLevel(nextLevel)
-        if (pauseDetector.current?.update(rawRms, now).shouldStop && recorder.current?.state === 'recording') recorder.current.stop()
-        if (recordingRef.current && now - startedAt.current >= maxRecordingMs) recorder.current?.stop()
-        animation.current = requestAnimationFrame(updateLevel)
+      } else {
+        const analyser = context.createAnalyser()
+        analyser.fftSize = 512
+        analyser.smoothingTimeConstant = 0.72
+        source.connect(analyser)
+        const data = new Uint8Array(analyser.fftSize)
+        const updateLevel = () => {
+          if (!recordingRef.current) return
+          const now = performance.now()
+          analyser.getByteTimeDomainData(data)
+          let sumSquares = 0
+          for (const sample of data) {
+            const centered = (sample - 128) / 128
+            sumSquares += centered * centered
+          }
+          const rawRms = Math.sqrt(sumSquares / data.length)
+          const nextLevel = Math.min(1, rawRms * 8)
+          rmsTotal += rawRms
+          rmsSamples += 1
+          peakLevel = Math.max(peakLevel, rawRms)
+          setLevel(nextLevel)
+          if (pauseDetector.current?.update(rawRms, now).shouldStop && recorder.current?.state === 'recording') recorder.current.stop()
+          if (recordingRef.current && now - startedAt.current >= maxRecordingMs) recorder.current?.stop()
+          animation.current = requestAnimationFrame(updateLevel)
+        }
+        updateLevel()
       }
-      updateLevel()
     } catch (cause) {
       startingRecording.current = false
       releaseMicrophone()
@@ -452,6 +511,15 @@ export default function App() {
   }
 
   const stopRecording = () => { if (recorder.current?.state === 'recording') recorder.current.stop() }
+  const loadPerformanceMetrics = async () => {
+    try {
+      const response = await fetch(`${apiUrl}/metrics`)
+      if (!response.ok) throw new Error('metrics unavailable')
+      setPerformanceStats(JSON.stringify(await response.json(), null, 2))
+    } catch {
+      setPerformanceStats('Performance metrics are unavailable.')
+    }
+  }
   const clear = () => {
     if (busyRef.current || recordingRef.current) return
     if (!client.current?.clear()) { setError('Reconnect before clearing the conversation.'); return }
@@ -473,7 +541,18 @@ export default function App() {
     }
   }
   const deleteEntry = (entry: Entry) => setEntries((current) => current.filter((candidate) => candidate.id !== entry.id))
-  const speakEntry = (entry: Entry) => playback.current?.speakText(entry.text)
+  const speakEntry = (entry: Entry) => {
+    if (voiceModeRef.current === 'browser') {
+      playback.current?.speakText(entry.text)
+      return
+    }
+    const responseId = `replay-${crypto.randomUUID()}`
+    playback.current?.start(responseId, true)
+    if (!client.current?.speakText(entry.text, responseId, selectedCloudVoice(), voiceProviderRef.current)) {
+      playback.current?.stop()
+      setError('Reconnect before playing the natural voice.')
+    }
+  }
 
   const recordDebugSample = async () => {
     if (debugRecording || recordingRef.current || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') return
@@ -553,7 +632,7 @@ export default function App() {
           )}
         </div>
 
-        <button className="mic-control" type="button" onClick={() => { if (recording) stopRecording(); else void startRecording() }} disabled={status !== 'connected' || busy} aria-label={recording ? 'Stop recording and send' : 'Start recording'}>
+        <button className="mic-control" type="button" onClick={() => { if (recording) stopRecording(); else void startRecording() }} disabled={status !== 'connected'} aria-label={recording ? 'Stop recording and send' : busy ? 'Interrupt and start recording' : 'Start recording'}>
           {recording ? <span className="stop-glyph" aria-hidden="true" /> : <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"/></svg>}
         </button>
 
@@ -563,7 +642,7 @@ export default function App() {
         </div>
 
         <dl className="session-details">
-          <div><dt>Voice</dt><dd>{voiceMode === 'cloud' ? voicePersona : voiceMode}</dd></div>
+          <div><dt>Voice</dt><dd>{voiceMode === 'cloud' ? `${voiceProvider} · ${voicePersona}` : voiceMode}</dd></div>
           <div><dt>Mode</dt><dd>Auto-send</dd></div>
           <div><dt>Privacy</dt><dd>Local only</dd></div>
         </dl>
@@ -612,11 +691,12 @@ export default function App() {
         <div className="drawer-header"><div><span>Preferences</span><h2 id="settings-title">Voice settings</h2></div><button className="icon-button" type="button" onClick={() => setSettingsOpen(false)} aria-label="Close settings"><Icon name="close" /></button></div>
         <div className="drawer-content">
           <section className="setting-group"><div className="setting-heading"><strong>Response voice</strong><span>Choose how replies are read aloud.</span></div><div className="segmented-control" role="radiogroup" aria-label="Response voice">{([['cloud', 'Natural'], ['browser', 'Browser'], ['text', 'Text only']] as const).map(([value, label]) => <button type="button" role="radio" aria-checked={voiceMode === value} className={voiceMode === value ? 'selected' : ''} onClick={() => { setVoiceMode(value); playback.current?.setMuted(value === 'text'); if (value === 'text') client.current?.stopSpeaking() }} key={value}>{label}</button>)}</div></section>
-          {voiceMode === 'cloud' && <section className="setting-group"><div className="setting-heading"><strong>Cloud voice</strong><span>Select the natural voice used for new responses.</span></div><div className="voice-personas" role="radiogroup" aria-label="Cloud voice"><button type="button" role="radio" aria-checked={voicePersona === 'male'} className={voicePersona === 'male' ? 'selected' : ''} onClick={() => selectVoicePersona('male')}><span className="voice-avatar" aria-hidden="true">M</span><span><strong>Male</strong><small>Troy</small></span><i /></button><button type="button" role="radio" aria-checked={voicePersona === 'female'} className={voicePersona === 'female' ? 'selected' : ''} onClick={() => selectVoicePersona('female')}><span className="voice-avatar" aria-hidden="true">F</span><span><strong>Female</strong><small>Autumn</small></span><i /></button></div></section>}
+          {voiceMode === 'cloud' && <section className="setting-group"><div className="setting-heading"><strong>Voice engine</strong><span>Local has no quota. Groq is faster but uses your account allowance.</span></div><div className="segmented-control" role="radiogroup" aria-label="Voice engine">{([['kokoro', 'Local'], ['groq', 'Groq']] as const).map(([value, label]) => <button type="button" role="radio" aria-checked={voiceProvider === value} className={voiceProvider === value ? 'selected' : ''} onClick={() => selectVoiceProvider(value)} key={value}>{label}</button>)}</div></section>}
+          {voiceMode === 'cloud' && <section className="setting-group"><div className="setting-heading"><strong>Natural voice</strong><span>{voiceProvider === 'kokoro' ? 'Kokoro local English voice.' : 'Groq Orpheus English voice.'}</span></div><div className="voice-personas" role="radiogroup" aria-label="Natural voice"><button type="button" role="radio" aria-checked={voicePersona === 'male'} className={voicePersona === 'male' ? 'selected' : ''} onClick={() => selectVoicePersona('male')}><span className="voice-avatar" aria-hidden="true">M</span><span><strong>Male</strong><small>{voiceProvider === 'kokoro' ? 'Michael' : 'Troy'}</small></span><i /></button><button type="button" role="radio" aria-checked={voicePersona === 'female'} className={voicePersona === 'female' ? 'selected' : ''} onClick={() => selectVoicePersona('female')}><span className="voice-avatar" aria-hidden="true">F</span><span><strong>Female</strong><small>{voiceProvider === 'kokoro' ? 'Bella' : 'Autumn'}</small></span><i /></button></div></section>}
           <section className="setting-group"><label className="setting-heading" htmlFor="microphone"><strong>Microphone</strong><span>Select the input the assistant should listen to.</span></label><select id="microphone" value={selectedAudioInput} onChange={(event) => { autoSelectAudioInput.current = false; setSelectedAudioInput(event.target.value); if (!recordingRef.current) releaseMicrophone() }} disabled={recording || busy}>{audioInputs.length === 0 && <option value="">Default microphone</option>}{audioInputs.map((device, index) => <option value={device.deviceId} key={device.deviceId || index}>{device.label || `Microphone ${index + 1}`}</option>)}</select></section>
           <section className="setting-row"><div className="setting-heading"><strong>Automatic send</strong><span>A long pause ends the recording. Press the microphone again to stop immediately.</span></div><span className="always-on-badge"><i />On</span></section>
           <section className="privacy-note"><div><strong>Audio handling</strong><p>Recordings are sent to Groq for transcription. This app does not save your audio files.</p></div></section>
-          {import.meta.env.DEV && <section className="diagnostics"><button className="diagnostics-toggle" type="button" onClick={() => setDebugOpen((value) => !value)}>Audio diagnostics <span>{debugOpen ? '−' : '+'}</span></button>{debugOpen && <div className="diagnostics-body"><p>Record a five-second sample without invoking the LLM.</p><button type="button" onClick={() => void recordDebugSample()} disabled={debugRecording}>{debugRecording ? 'Recording…' : 'Record sample'}</button>{debugUrl && <audio controls src={debugUrl} />}{debugStats && <small>{debugStats}</small>}{debugTranscript && <p><strong>Transcript:</strong> {debugTranscript}</p>}<small>Input: {activeInput || 'not sampled'}{inputSampleRate ? ` · ${inputSampleRate} Hz` : ''}</small></div>}</section>}
+          {import.meta.env.DEV && <section className="diagnostics"><button className="diagnostics-toggle" type="button" onClick={() => setDebugOpen((value) => !value)}>Audio diagnostics <span>{debugOpen ? '−' : '+'}</span></button>{debugOpen && <div className="diagnostics-body"><p>Record a five-second sample without invoking the LLM.</p><button type="button" onClick={() => void recordDebugSample()} disabled={debugRecording}>{debugRecording ? 'Recording…' : 'Record sample'}</button>{debugUrl && <audio controls src={debugUrl} />}{debugStats && <small>{debugStats}</small>}{debugTranscript && <p><strong>Transcript:</strong> {debugTranscript}</p>}<small>Input: {activeInput || 'not sampled'}{inputSampleRate ? ` · ${inputSampleRate} Hz` : ''}</small><button type="button" onClick={() => void loadPerformanceMetrics()}>Load performance metrics</button>{performanceStats && <pre>{performanceStats}</pre>}</div>}</section>}
         </div>
       </aside>
     </div>}

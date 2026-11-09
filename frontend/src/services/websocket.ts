@@ -13,6 +13,10 @@ export type ServerEvent =
   | { type: 'tts_error'; responseId: string; message: string }
   | { type: 'tts_complete'; responseId: string; segmentCount: number }
   | { type: 'tts_stopped' }
+  | { type: 'tts_provider_changed'; responseId: string; from: 'kokoro' | 'groq'; to: 'kokoro' | 'groq' }
+  | { type: 'listening'; requestId: string; state: 'LISTENING' }
+  | { type: 'speech_started'; requestId: string }
+  | { type: 'speech_ended'; requestId: string; frames: number; speechDetected: boolean; state: 'TRANSCRIBING' }
   | { type: 'transcript'; requestId: string; text: string }
   | { type: 'transcript_only'; requestId: string; text: string }
   | { type: 'cleared' }
@@ -80,16 +84,46 @@ export class NovaWebSocket {
     socket.onerror = () => socket.close()
   }
 
-  sendMessage(text: string, requestId: string, speak = true, voice = 'troy'): boolean {
+  sendMessage(text: string, requestId: string, speak = true, voice = 'male', provider = 'kokoro'): boolean {
     if (this.socket?.readyState !== WebSocket.OPEN) return false
-    this.socket.send(JSON.stringify({ type: 'message', text, requestId, speak, voice }))
+    this.socket.send(JSON.stringify({ type: 'message', text, requestId, speak, voice, provider }))
     return true
   }
 
-  async sendAudio(blob: Blob, mimeType: string, requestId: string, speak = true, transcribeOnly = false, voice = 'troy'): Promise<boolean> {
+  startPcmStream(requestId: string, sampleRate = 16000): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false
+    this.socket.send(JSON.stringify({ type: 'pcm_stream_start', requestId, sampleRate, format: 's16le' }))
+    return true
+  }
+
+  sendPcmFrame(sequence: number, timestampMs: number, sampleRate: number, pcm: Int16Array): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN || this.socket.bufferedAmount > 512 * 1024) return false
+    const packet = new ArrayBuffer(16 + pcm.byteLength)
+    const view = new DataView(packet)
+    view.setUint32(0, sequence, true)
+    view.setFloat64(4, timestampMs, true)
+    view.setUint32(12, sampleRate, true)
+    new Int16Array(packet, 16).set(pcm)
+    this.socket.send(packet)
+    return true
+  }
+
+  endPcmStream(requestId: string): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false
+    this.socket.send(JSON.stringify({ type: 'pcm_stream_end', requestId }))
+    return true
+  }
+
+  sendMetric(name: string, durationMs: number): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN || !Number.isFinite(durationMs)) return false
+    this.socket.send(JSON.stringify({ type: 'client_metric', name, durationMs }))
+    return true
+  }
+
+  async sendAudio(blob: Blob, mimeType: string, requestId: string, speak = true, transcribeOnly = false, voice = 'male', provider = 'kokoro'): Promise<boolean> {
     const data = await blob.arrayBuffer()
     if (this.socket?.readyState !== WebSocket.OPEN) return false
-    this.socket.send(JSON.stringify({ type: 'audio_start', mimeType, size: data.byteLength, requestId, speak, transcribeOnly, voice }))
+    this.socket.send(JSON.stringify({ type: 'audio_start', mimeType, size: data.byteLength, requestId, speak, transcribeOnly, voice, provider }))
     this.socket.send(data)
     return true
   }
@@ -109,6 +143,12 @@ export class NovaWebSocket {
   stopGeneration(): boolean {
     if (this.socket?.readyState !== WebSocket.OPEN) return false
     this.socket.send(JSON.stringify({ type: 'stop_generation' }))
+    return true
+  }
+
+  speakText(text: string, requestId: string, voice = 'male', provider = 'kokoro'): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false
+    this.socket.send(JSON.stringify({ type: 'speak_text', text, requestId, voice, provider }))
     return true
   }
 
@@ -157,6 +197,11 @@ function isServerEvent(value: unknown): value is ServerEvent {
     (event.type === 'tts_error' && typeof event.responseId === 'string' && typeof event.message === 'string') ||
     (event.type === 'tts_complete' && typeof event.responseId === 'string' && Number.isInteger(event.segmentCount)) ||
     event.type === 'tts_stopped' ||
+    (event.type === 'tts_provider_changed' && typeof event.responseId === 'string' &&
+      (event.from === 'kokoro' || event.from === 'groq') && (event.to === 'kokoro' || event.to === 'groq')) ||
+    (event.type === 'listening' && typeof event.requestId === 'string') ||
+    (event.type === 'speech_started' && typeof event.requestId === 'string') ||
+    (event.type === 'speech_ended' && typeof event.requestId === 'string' && typeof event.frames === 'number' && typeof event.speechDetected === 'boolean') ||
     (event.type === 'transcript' && typeof event.requestId === 'string' && typeof event.text === 'string') ||
     (event.type === 'transcript_only' && typeof event.requestId === 'string' && typeof event.text === 'string') ||
     event.type === 'cleared' ||

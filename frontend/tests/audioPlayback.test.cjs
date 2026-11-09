@@ -68,6 +68,16 @@ test('stop interrupts playback and ignores late segments', () => {
   assert.equal(states.at(-1), 'stopped')
 })
 
+test('reports the first natural playback start once', async () => {
+  fakeBrowser()
+  const starts = []
+  const player = new AudioPlayback(() => {}, () => {}, (responseId) => starts.push(responseId))
+  player.start('timed-reply', true)
+  player.enqueueAudio({ responseId: 'timed-reply', segmentId: 'timed-reply:0', index: 0, mimeType: 'audio/wav', text: 'First.' }, new ArrayBuffer(1))
+  await Promise.resolve()
+  assert.deepEqual(starts, ['timed-reply'])
+})
+
 test('cloud playback failure never changes to robotic browser speech', () => {
   const browser = fakeBrowser()
   const states = []

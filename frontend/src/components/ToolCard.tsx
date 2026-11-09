@@ -20,6 +20,12 @@ const safeHttpUrl = (value: string) => {
 export function ToolCard({ tool }: Props) {
   const result = tool.result || {}
   const source = safeHttpUrl(text(result.source))
+  const sources = Array.isArray(result.sources) ? result.sources.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return []
+    const record = item as Record<string, unknown>
+    const url = safeHttpUrl(text(record.url))
+    return url ? [{ title: text(record.title) || 'Open source', url }] : []
+  }).slice(0, 3) : []
 
   if (tool.name === 'get_weather' && tool.state === 'done') {
     return <aside className="tool-card weather-card" aria-label="Weather result">
@@ -30,6 +36,7 @@ export function ToolCard({ tool }: Props) {
         <span>{text(result.condition)} · Feels like {text(result.feels_like)}{text(result.temperature_unit)}</span>
         <span>Humidity {text(result.relative_humidity)}{text(result.humidity_unit)} · Wind {text(result.wind_speed)} {text(result.wind_speed_unit)}</span>
         <small>Observed {text(result.observed_at)} · {text(result.source)}</small>
+        {text(result.today_rain_chance) && <span>Today: {text(result.today_rain_chance)}{text(result.today_rain_chance_unit)} rain chance · High {text(result.today_high)}{text(result.today_temperature_unit)}</span>}
       </div>
       <div className="weather-temperature">{text(result.temperature)}{text(result.temperature_unit)}</div>
     </aside>
@@ -42,7 +49,9 @@ export function ToolCard({ tool }: Props) {
         <span className="tool-kicker">Web source</span>
         <strong>{text(result.query) || 'Search result'}</strong>
         {text(result.answer) && <span>{text(result.answer)}</span>}
-        {source && <a href={source} target="_blank" rel="noreferrer noopener">Open source</a>}
+        {sources.length > 0
+          ? <div className="search-sources">{sources.map((item) => <a key={item.url} href={item.url} target="_blank" rel="noreferrer noopener">{item.title}</a>)}</div>
+          : source && <a href={source} target="_blank" rel="noreferrer noopener">Open source</a>}
       </div>
     </aside>
   }

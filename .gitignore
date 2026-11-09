@@ -9,3 +9,5 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 .local-backup-before-pull/
+backend/models/kokoro/*.onnx
+backend/models/kokoro/*.bin

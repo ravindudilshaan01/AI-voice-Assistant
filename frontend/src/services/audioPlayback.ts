@@ -19,6 +19,7 @@ export class AudioPlayback {
   constructor(
     private readonly onStatus: (status: PlaybackStatus) => void,
     private readonly onError: (message: string) => void,
+    private readonly onPlaybackStart: (responseId: string) => void = () => undefined,
   ) {}
 
   start(responseId: string, speak: boolean): void {
@@ -138,7 +139,9 @@ export class AudioPlayback {
     }
     audio.onended = () => { if (!handled) { handled = true; this.finishSegment(token) } }
     audio.onerror = failNaturalPlayback
-    void audio.play().catch(failNaturalPlayback)
+    void audio.play().then(() => {
+      if (token === this.generation && this.nextIndex === 0 && this.responseId) this.onPlaybackStart(this.responseId)
+    }).catch(failNaturalPlayback)
   }
 
   private speakInBrowser(text: string, token: number): void {
@@ -155,6 +158,7 @@ export class AudioPlayback {
     const preferred = english.find((voice) => (this.voicePersona === 'female' ? femalePattern : malePattern).test(voice.name))
     if (preferred) utterance.voice = preferred
     this.onStatus('browser')
+    if (this.nextIndex === 0 && this.responseId) this.onPlaybackStart(this.responseId)
     utterance.onend = () => this.finishSegment(token)
     utterance.onerror = () => {
       if (token === this.generation) this.onError('Browser speech playback failed. Try again or unmute your device.')

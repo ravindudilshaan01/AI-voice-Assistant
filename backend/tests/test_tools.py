@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app.agents.voice_agent import MAX_TOOL_ROUNDS, stream_agent, tool_choice_for
+from app.agents.voice_agent import MAX_TOOL_ROUNDS, deterministic_multi_request, stream_agent, tool_choice_for, tool_schemas_for
 from app.tools.calculator import calculate
 from app.tools.errors import ToolError
 from app.tools.registry import execute_tool
@@ -60,9 +60,22 @@ class CalculatorTests(unittest.TestCase):
 
 
 class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    def test_compound_shopping_request_is_extracted_without_fragile_llm_orchestration(self):
+        prompt = "Go out in Colombo, check the current weather, calculate the final price of an 8000 purchase after a 15% discount, and remind me in one minute to check my shopping list."
+        requests = deterministic_multi_request(prompt)
+        self.assertEqual([name for name, _ in requests], ["get_weather", "calculate", "schedule_event"])
+        self.assertIn("check my shopping list", requests[-1][1])
+
     async def test_weather_and_reminder_requests_force_the_correct_live_tool(self):
-        self.assertEqual(tool_choice_for("Weather in Gampaha", 0)["function"]["name"], "get_weather")
-        self.assertEqual(tool_choice_for("Remind me in ten minutes", 0)["function"]["name"], "schedule_event")
+        self.assertEqual(tool_choice_for("Weather in Gampaha", 0), "required")
+        self.assertEqual(tool_schemas_for("Weather in Gampaha", 0)[0]["function"]["name"], "get_weather")
+        self.assertEqual(tool_choice_for("Remind me in ten minutes", 0), "required")
+        self.assertEqual(tool_schemas_for("Remind me in ten minutes", 0)[0]["function"]["name"], "schedule_event")
+        self.assertEqual(tool_choice_for("What is 17 multiplied by 23?", 0), "required")
+        self.assertEqual(tool_schemas_for("What is 17 multiplied by 23?", 0)[0]["function"]["name"], "calculate")
+        self.assertEqual(tool_choice_for("Search the web for the latest Python version", 0), "required")
+        self.assertEqual(tool_schemas_for("Search the web for the latest Python version", 0)[0]["function"]["name"], "web_search")
+        self.assertEqual(tool_choice_for("Calculate 2+2 and check Colombo weather", 0), "auto")
         self.assertEqual(tool_choice_for("Hello", 0), "auto")
         self.assertEqual(tool_choice_for("Weather in Gampaha", 1), "auto")
 
@@ -97,6 +110,19 @@ class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_messages[-3]["role"], "assistant")
         self.assertEqual([message["tool_call_id"] for message in second_messages[-2:]], ["call_calc", "call_weather"])
         self.assertTrue(all(json.loads(message["content"])["ok"] for message in second_messages[-2:]))
+
+    async def test_duplicate_side_effecting_calls_execute_once(self):
+        first = chunks(chunk(calls=[
+            call(0, "reminder-a", "schedule_event", '{"title":"leave","when":"in 30 minutes"}'),
+            call(1, "reminder-b", "schedule_event", '{"title":"leave","when":"in 30 minutes"}'),
+        ]))
+        fake = FakeGroq([first, chunks(chunk(content="Reminder set."))])
+        execute = AsyncMock(return_value={"title": "leave", "when": "in 30 minutes", "saved": True})
+        with patch("app.agents.voice_agent.make_client", return_value=fake), \
+             patch("app.agents.voice_agent.execute_tool", new=execute):
+            events = [event async for event in stream_agent([], "Remind me to leave in 30 minutes")]
+        self.assertEqual(execute.await_count, 1)
+        self.assertEqual(len([event for event in events if event["type"] == "tool_result"]), 2)
 
     async def test_normal_reply_uses_one_model_call(self):
         fake = FakeGroq([chunks(chunk(content="Hello"))])
@@ -158,6 +184,45 @@ class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ToolError, "timed out"):
                 await get_weather("Colombo")
 
+    async def test_weather_retries_a_transient_upstream_failure(self):
+        calls = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(503, request=request)
+            if "geocoding" in str(request.url):
+                return httpx.Response(200, json={"results": [{"name": "Colombo", "country": "Sri Lanka", "latitude": 6.9, "longitude": 79.9, "timezone": "Asia/Colombo"}]})
+            return httpx.Response(200, json={"timezone": "Asia/Colombo", "current": {"time": "2026-11-08T10:00", "temperature_2m": 29, "weather_code": 1}, "current_units": {"temperature_2m": "degC"}})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        with patch("app.tools.weather.httpx.AsyncClient", return_value=client), \
+             patch("app.tools.weather.asyncio.sleep", new=AsyncMock()) as wait:
+            result = await get_weather("Colombo")
+        self.assertEqual(result["temperature"], 29)
+        wait.assert_awaited_once()
+
+    async def test_weather_includes_today_rain_forecast(self):
+        def respond(request: httpx.Request) -> httpx.Response:
+            if "geocoding" in str(request.url):
+                return httpx.Response(200, json={"results": [{"name": "Colombo", "country": "Sri Lanka", "latitude": 6.9, "longitude": 79.9, "timezone": "Asia/Colombo"}]})
+            self.assertIn("precipitation_probability_max", request.url.params["daily"])
+            return httpx.Response(200, json={
+                "timezone": "Asia/Colombo",
+                "current": {"time": "2026-11-08T10:00", "temperature_2m": 29, "weather_code": 1},
+                "current_units": {"temperature_2m": "degC"},
+                "daily": {"time": ["2026-11-08"], "weather_code": [61], "temperature_2m_max": [31], "temperature_2m_min": [25], "precipitation_sum": [6.4], "precipitation_probability_max": [75], "wind_speed_10m_max": [18]},
+                "daily_units": {"temperature_2m_max": "degC", "precipitation_sum": "mm", "precipitation_probability_max": "%", "wind_speed_10m_max": "km/h"},
+            })
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        with patch("app.tools.weather.httpx.AsyncClient", return_value=client):
+            result = await get_weather("Colombo, Sri Lanka")
+        self.assertEqual(result["today_rain_chance"], 75)
+        self.assertEqual(result["today_precipitation"], 6.4)
+        self.assertEqual(result["today_condition"], "Rain")
+
     async def test_weather_rejects_ambiguous_misheard_location(self):
         client = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, json={"results": [
@@ -179,6 +244,27 @@ class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["answer"], "A concise result.")
         self.assertEqual(result["source"], "https://example.test")
 
+    async def test_web_search_falls_back_to_groq_browser_search_with_sources(self):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"AbstractText": "", "RelatedTopics": []})
+        ))
+        message = SimpleNamespace(
+            content="The verified current answer.",
+            executed_tools=[SimpleNamespace(search_results=SimpleNamespace(results=[
+                SimpleNamespace(title="Primary source", url="https://example.test/current"),
+            ]))],
+        )
+        with patch("app.tools.search.httpx.AsyncClient", return_value=client), \
+             patch("app.tools.search.groq_api_key", return_value="test-key"), \
+             patch("app.tools.search.AsyncGroq") as groq:
+            groq.return_value.__aenter__.return_value.chat.completions.create = AsyncMock(
+                return_value=SimpleNamespace(choices=[SimpleNamespace(message=message)])
+            )
+            result = await web_search("current fact")
+        self.assertEqual(result["answer"], "The verified current answer.")
+        self.assertEqual(result["source"], "https://example.test/current")
+        self.assertEqual(result["sources"][0]["title"], "Primary source")
+
     async def test_scheduler_is_explicitly_session_memory(self):
         result = schedule_event("Demo", "tomorrow at 9 AM")
         self.assertTrue(result["saved"])
@@ -191,6 +277,8 @@ class ToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         now = datetime(2026, 11, 7, 14, 30, 15, tzinfo=ZoneInfo("Asia/Colombo"))
         self.assertEqual(parse_reminder_time("in 10 minutes", now).isoformat(), "2026-11-07T14:40:15+05:30")
+        self.assertEqual(parse_reminder_time("in ten minutes", now).isoformat(), "2026-11-07T14:40:15+05:30")
+        self.assertEqual(parse_reminder_time("in twenty five minutes", now).isoformat(), "2026-11-07T14:55:15+05:30")
         self.assertEqual(parse_reminder_time("tomorrow at 9 AM", now).isoformat(), "2026-11-08T09:00:00+05:30")
         with self.assertRaisesRegex(ToolError, "AM or PM"):
             parse_reminder_time("tomorrow at 9", now)

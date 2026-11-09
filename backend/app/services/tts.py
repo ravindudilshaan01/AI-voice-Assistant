@@ -4,11 +4,12 @@ import re
 
 from groq import AsyncGroq, RateLimitError
 
-from app.config import GROQ_TTS_MIN_INTERVAL_SECONDS, GROQ_TTS_MODEL, GROQ_TTS_VOICE, groq_api_key
+from app.config import GROQ_TTS_MIN_INTERVAL_SECONDS, GROQ_TTS_MODEL, GROQ_TTS_VOICE, TTS_PROVIDER, groq_api_key
 from app.services.groq_errors import ServiceError, friendly_error
 
 
-SUPPORTED_TTS_VOICES = {"troy", "autumn"}
+SUPPORTED_TTS_VOICES = {"male", "female", "troy", "autumn"}
+SUPPORTED_TTS_PROVIDERS = {"kokoro", "groq"}
 TTS_MODEL = GROQ_TTS_MODEL
 TTS_VOICE = GROQ_TTS_VOICE if GROQ_TTS_VOICE in SUPPORTED_TTS_VOICES else "troy"
 MAX_TTS_CHARS = 200
@@ -59,8 +60,17 @@ def spoken_text(text: str) -> str:
         return ""
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"[`*_#>]", "", text)
+    # Orpheus can pronounce punctuation literally or spell the following unit.
+    # Convert written ranges and hyphenated durations into natural spoken prose.
+    text = re.sub(r"(?<=\d)\s*[-\u2013\u2014]\s*(?=\d)", " to ", text)
+    text = re.sub(r"(?<=\d)\s*[-\u2013\u2014]\s*(?=(?:seconds?|minutes?|hours?|days?|weeks?)\b)", " ", text, flags=re.I)
+    text = re.sub(r"\b(\d+(?:\.\d+)?)\s*(?:mins?|min\.)\b", r"\1 minutes", text, flags=re.I)
+    text = re.sub(r"\b(\d+(?:\.\d+)?)\s*(?:hrs?|hr\.)\b", r"\1 hours", text, flags=re.I)
+    text = re.sub(r"\s+[-\u2013\u2014]\s+", ", ", text)
     # Give the speech model unambiguous words for common numeric notation.
     # Without this, values such as 26.5 can be read digit-by-digit.
+    text = re.sub(r"(-?\d+(?:\.\d+)?)\s*\u00b0\s*C\b", r"\1 degrees Celsius", text, flags=re.I)
+    text = re.sub(r"(-?\d+(?:\.\d+)?)\s*\u00b0\s*F\b", r"\1 degrees Fahrenheit", text, flags=re.I)
     text = re.sub(r"(-?\d+(?:\.\d+)?)\s*°\s*C\b", r"\1 degrees Celsius", text, flags=re.I)
     text = re.sub(r"(-?\d+(?:\.\d+)?)\s*°\s*F\b", r"\1 degrees Fahrenheit", text, flags=re.I)
     text = re.sub(r"(-?\d+(?:\.\d+)?)\s*km\s*/\s*h\b", r"\1 kilometers per hour", text, flags=re.I)
@@ -84,8 +94,9 @@ def split_long(text: str) -> list[str]:
 
 
 class SentenceSegmenter:
-    def __init__(self) -> None:
+    def __init__(self, eager: bool = False) -> None:
         self.buffer = ""
+        self.eager = eager
         self._structure_depth = 0
         self._in_string = False
         self._escaped = False
@@ -137,6 +148,12 @@ class SentenceSegmenter:
     def feed(self, delta: str) -> list[str]:
         self.buffer += self._prose(delta)
         ready: list[str] = []
+        if self.eager:
+            while (match := SENTENCE_END.search(self.buffer)) is not None:
+                clean = spoken_text(self.buffer[:match.end()])
+                if clean:
+                    ready.extend(split_long(clean))
+                self.buffer = self.buffer[match.end():].lstrip()
         while len(spoken_text(self.buffer)) > MAX_TTS_CHARS:
             # Keep adjacent short sentences together. A single synthesis call
             # preserves voice, pacing and prosody much better than one request
@@ -163,13 +180,20 @@ class SentenceSegmenter:
         return split_long(spoken_text(remaining))
 
 
-async def generate_wav(text: str, voice: str = TTS_VOICE) -> bytes:
+async def generate_wav(text: str, voice: str = TTS_VOICE, provider: str | None = None) -> bytes:
     global _daily_quota_unavailable_until
     clean = spoken_text(text)
     if not clean or len(clean) > MAX_TTS_CHARS:
         raise ServiceError("Speech segment is invalid or too long.")
     if voice not in SUPPORTED_TTS_VOICES:
         raise ServiceError("The selected voice is unavailable.")
+    selected_provider = provider or TTS_PROVIDER
+    if selected_provider == "kokoro":
+        from app.services.kokoro_tts import generate_wav as generate_kokoro_wav
+
+        return await generate_kokoro_wav(clean, voice)
+    if selected_provider not in SUPPORTED_TTS_PROVIDERS:
+        raise ServiceError("The configured TTS provider is unsupported.")
     key = groq_api_key()
     if not key:
         raise ServiceError("Cloud speech is not configured.")
@@ -181,8 +205,9 @@ async def generate_wav(text: str, voice: str = TTS_VOICE) -> bytes:
         await _wait_for_tts_slot()
         try:
             async with AsyncGroq(api_key=key, timeout=30.0, max_retries=0) as client:
+                groq_voice = "autumn" if voice in ("female", "autumn") else "troy"
                 response = await client.audio.speech.create(
-                    model=TTS_MODEL, voice=voice, input=clean, response_format="wav"
+                    model=TTS_MODEL, voice=groq_voice, input=clean, response_format="wav"
                 )
                 audio = await response.read()
         except RateLimitError as error:

@@ -14,7 +14,7 @@ SYSTEM_PROMPT = (
     "If a transcribed place name is ambiguous or looks misheard, ask for the city and country instead of guessing. "
     "Be honest when you do not know something. "
     "Use tools when current weather, web information, exact arithmetic, or an in-session reminder is needed. "
-    "For weather, use the returned location and observation values exactly; never substitute or estimate them. "
+    "For weather, use the returned location and values exactly; never substitute or estimate them. For umbrella advice, use today_rain_chance and today_precipitation, not only the current observation. "
     "For reminders, never guess an ambiguous time: ask for AM or PM, and explain that the page must remain connected for the reminder to speak. "
     "Do not invent tool results."
 )
@@ -26,4 +26,4 @@ def make_client() -> AsyncGroq:
     key = groq_api_key()
     if not key:
         raise ServiceError("Groq is not configured. Add GROQ_API_KEY to backend/.env.")
-    return AsyncGroq(api_key=key, timeout=30.0, max_retries=0)
+    return AsyncGroq(api_key=key, timeout=45.0, max_retries=2)

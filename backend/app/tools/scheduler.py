@@ -7,6 +7,26 @@ from app.tools.errors import ToolError
 
 
 _EVENTS: list[dict[str, str | bool]] = []
+_NUMBER_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
+    "forty": 40, "fifty": 50, "sixty": 60,
+}
+
+
+def _duration_amount(value: str) -> int | None:
+    if value.isdigit():
+        return int(value)
+    parts = value.replace("-", " ").split()
+    if not parts or any(part not in _NUMBER_WORDS for part in parts):
+        return None
+    if len(parts) == 1:
+        return _NUMBER_WORDS[parts[0]]
+    if len(parts) == 2 and _NUMBER_WORDS[parts[0]] >= 20 and _NUMBER_WORDS[parts[1]] < 10:
+        return _NUMBER_WORDS[parts[0]] + _NUMBER_WORDS[parts[1]]
+    return None
 
 
 def _timezone() -> ZoneInfo:
@@ -23,9 +43,11 @@ def parse_reminder_time(when: str, now: datetime | None = None) -> datetime:
         current = current.replace(tzinfo=_timezone())
     value = " ".join(when.casefold().strip().split())
 
-    relative = re.fullmatch(r"in\s+(\d+)\s*(second|seconds|minute|minutes|hour|hours)", value)
+    relative = re.fullmatch(r"in\s+([a-z\d-]+(?:\s+[a-z-]+)?)\s+(second|seconds|minute|minutes|hour|hours)", value)
     if relative:
-        amount = int(relative.group(1))
+        amount = _duration_amount(relative.group(1))
+        if amount is None:
+            raise ToolError("I could not understand that reminder duration. Say, for example, 'in ten minutes'.")
         if amount < 1:
             raise ToolError("The reminder time must be in the future.")
         unit = relative.group(2)
