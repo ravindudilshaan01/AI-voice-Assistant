@@ -1,3 +1,4 @@
+import asyncio
 import json
 import inspect
 from collections.abc import Awaitable, Callable
@@ -9,6 +10,7 @@ from app.tools.errors import ToolError
 from app.tools.scheduler import schedule_event
 from app.tools.search import web_search
 from app.tools.weather import get_weather
+from app.config import TOOL_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,7 @@ class ToolSpec:
 TOOLS = {
     "get_weather": ToolSpec(
         name="get_weather", label="Checking weather",
-        description="Get current weather for a city or place. Use when the user asks for current weather or temperature; do not use for forecasts.",
+        description="Get live weather plus today's forecast for a city or place. Use for current conditions, today's rain chance, temperature, or umbrella advice.",
         parameters={"type": "object", "properties": {
             "location": {"type": "string", "description": "City or place, optionally with country, e.g. Colombo, Sri Lanka"},
             "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "Temperature unit; default celsius"},
@@ -54,10 +56,10 @@ TOOLS = {
     ),
     "schedule_event": ToolSpec(
         name="schedule_event", label="Saving reminder",
-        description="Save a reminder or event in this assistant session. Tell the user it is not synced to an external calendar.",
+        description="Schedule a spoken reminder in this live assistant connection. Preserve the user's exact time wording. If AM or PM is ambiguous, ask before calling this tool. Tell the user the connection must remain open.",
         parameters={"type": "object", "properties": {
             "title": {"type": "string", "description": "What the event or reminder is for"},
-            "when": {"type": "string", "description": "When it should happen, as stated by the user"},
+            "when": {"type": "string", "description": "Exact future time as stated by the user, e.g. 'in 10 minutes' or 'tomorrow at 9 AM'"},
         }, "required": ["title", "when"], "additionalProperties": False},
         execute=schedule_event,
     ),
@@ -93,5 +95,8 @@ async def execute_tool(name: str, raw_arguments: str) -> dict:
     args = parse_arguments(name, raw_arguments)
     result = TOOLS[name].execute(**args)
     if inspect.isawaitable(result):
-        result = await result
+        try:
+            result = await asyncio.wait_for(result, timeout=TOOL_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as error:
+            raise ToolError(f"{TOOLS[name].label} timed out. Please try again.") from error
     return result

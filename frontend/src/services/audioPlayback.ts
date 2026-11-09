@@ -14,10 +14,12 @@ export class AudioPlayback {
   private audio: HTMLAudioElement | null = null
   private url: string | null = null
   private generation = 0
+  private voicePersona: 'male' | 'female' = 'male'
 
   constructor(
     private readonly onStatus: (status: PlaybackStatus) => void,
     private readonly onError: (message: string) => void,
+    private readonly onPlaybackStart: (responseId: string) => void = () => undefined,
   ) {}
 
   start(responseId: string, speak: boolean): void {
@@ -55,6 +57,19 @@ export class AudioPlayback {
     this.muted = muted
     if (muted) this.stop()
     else this.onStatus('idle')
+  }
+
+  setVoicePersona(persona: 'male' | 'female'): void {
+    this.voicePersona = persona
+  }
+
+  speakText(text: string): void {
+    const clean = text.trim()
+    if (!clean || this.muted) return
+    const responseId = `browser-${Date.now()}`
+    this.start(responseId, true)
+    this.enqueueFallback(responseId, 0, clean)
+    this.complete(responseId, 1)
   }
 
   dispose(): void {
@@ -113,20 +128,20 @@ export class AudioPlayback {
     const audio = new Audio(this.url)
     this.audio = audio
     let handled = false
-    const useFallback = () => {
+    const failNaturalPlayback = () => {
       if (handled || token !== this.generation) return
       handled = true
       audio.pause()
       audio.onended = null
       audio.onerror = null
-      this.audio = null
-      if (this.url) URL.revokeObjectURL(this.url)
-      this.url = null
-      this.speakInBrowser(segment.text, token)
+      this.onError('Natural voice playback failed. The reply is still available as text.')
+      this.finishSegment(token)
     }
     audio.onended = () => { if (!handled) { handled = true; this.finishSegment(token) } }
-    audio.onerror = useFallback
-    void audio.play().catch(useFallback)
+    audio.onerror = failNaturalPlayback
+    void audio.play().then(() => {
+      if (token === this.generation && this.nextIndex === 0 && this.responseId) this.onPlaybackStart(this.responseId)
+    }).catch(failNaturalPlayback)
   }
 
   private speakInBrowser(text: string, token: number): void {
@@ -136,7 +151,14 @@ export class AudioPlayback {
       return
     }
     const utterance = new SpeechSynthesisUtterance(text)
+    const voices = typeof window.speechSynthesis.getVoices === 'function' ? window.speechSynthesis.getVoices() : []
+    const english = voices.filter((voice) => !voice.lang || voice.lang.toLowerCase().startsWith('en'))
+    const femalePattern = /\b(?:zira|samantha|victoria|karen|susan|hazel|aria|jenny|female|autumn)\b/i
+    const malePattern = /\b(?:david|mark|george|daniel|alex|guy|ryan|male|troy)\b/i
+    const preferred = english.find((voice) => (this.voicePersona === 'female' ? femalePattern : malePattern).test(voice.name))
+    if (preferred) utterance.voice = preferred
     this.onStatus('browser')
+    if (this.nextIndex === 0 && this.responseId) this.onPlaybackStart(this.responseId)
     utterance.onend = () => this.finishSegment(token)
     utterance.onerror = () => {
       if (token === this.generation) this.onError('Browser speech playback failed. Try again or unmute your device.')
