@@ -2,6 +2,35 @@
 
 Friday is a React, TypeScript, FastAPI, and WebSocket voice assistant powered by Groq. It uses Whisper for transcription, a configurable Groq model for streamed chat and tool calls, and `canopylabs/orpheus-v1-english` for spoken WAV responses.
 
+## Architecture at a glance
+
+The browser is the user interface and audio endpoint. The FastAPI backend owns the API key, conversation history, tool execution, speech synthesis, cancellation, and per-connection reminders.
+
+```text
+React + TypeScript browser
+  ├─ MediaRecorder: complete utterance for authoritative transcription
+  ├─ AudioWorklet: 16 kHz PCM activity/diagnostic frames
+  └─ WebSocket /ws
+       └─ FastAPI session coordinator
+            ├─ Groq Whisper: audio → final transcript
+            ├─ Groq chat model: streamed text + function calls
+            ├─ Tools: weather, web search, calculator, reminders
+            └─ TTS queue: Kokoro ONNX or Groq → ordered WAV segments
+```
+
+### Example request
+
+For “What is the weather in Colombo, and remind me in ten minutes to call Mum?”:
+
+1. `frontend/src/App.tsx` records the utterance and sends an `audio_start` JSON message followed by binary audio through `frontend/src/services/websocket.ts`.
+2. `backend/app/main.py` validates the upload and calls `backend/app/services/stt.py`, which sends it to Groq Whisper.
+3. `backend/app/agents/voice_agent.py` streams the response and selects `get_weather` and `schedule_event` from `backend/app/tools/registry.py`.
+4. The weather request calls Open-Meteo; the reminder is parsed in `APP_TIMEZONE` and held in backend memory for the active WebSocket connection.
+5. Text deltas are rendered immediately. Completed prose is split into short segments, synthesized by `backend/app/services/speech_session.py`, and played in order by `frontend/src/services/audioPlayback.ts`.
+6. If the user starts another turn, the browser sends cancellation; the backend cancels the active model/TTS tasks and rejects late audio using response and turn IDs.
+
+The protocol carries session IDs, request/turn IDs, monotonically increasing event sequence numbers, tool events, transcript events, TTS metadata followed by WAV bytes, cancellation events, and safe errors. Secrets remain backend-only. History is limited to 10 completed turns; reminders and metrics are in memory and reset when the backend restarts.
+
 ## Features
 
 - Streamed text chat over one WebSocket session
